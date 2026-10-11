@@ -1,0 +1,3 @@
+- insert:
+    - id: context-quote
+      name: '@local/dsh-context-quote'
