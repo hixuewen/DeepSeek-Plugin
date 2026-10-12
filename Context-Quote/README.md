@@ -2,6 +2,36 @@
 
 选中对话里的任意一段文字，就会在选区旁浮出 `引用` 按钮；点一下，这段文字就进入输入框、光标落到引用块之后，你可以直接针对它回复。
 
+## 安装
+
+需要 DSH（`@deepseek-ai/dsh`）宿主。本插件在 `0.2.1-alpha.2` 上验证通过。
+
+一条命令装进目标 profile（下例为 `web`，换成其他 profile 名同理）：
+
+```sh
+dsh plugin --profile web add "github:hixuewen/DeepSeek-Plugin#path:Context-Quote"
+```
+
+`#path:Context-Quote` 不能省略：插件包位于仓库子目录，仓库根没有 `package.json`。
+
+也可以先克隆仓库，再从本地目录安装：
+
+```sh
+git clone https://github.com/hixuewen/DeepSeek-Plugin.git
+dsh plugin --profile web add link:/绝对路径/DeepSeek-Plugin/Context-Quote
+```
+
+两种方式都会把本包写进该 profile 的 `dsh.profile.bundles`，插件自带的 `cordis.patch.yml` 随
+bundle 自动挂载，不需要手工编辑任何配置。
+
+安装后**重启 `dsh web`**，刷新页面即可生效。
+
+卸载：
+
+```sh
+dsh plugin --profile web remove @local/dsh-context-quote
+```
+
 ## 行为
 
 - **只认对话正文**：只有在会话消息区域内的选区才会触发；输入框、设置页、侧边栏里的选中文字不受影响。
