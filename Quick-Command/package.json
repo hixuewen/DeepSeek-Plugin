@@ -1,0 +1,55 @@
+{
+  "name": "dsh-quick-commands",
+  "version": "1.0.0",
+  "private": false,
+  "description": "One-click quick commands above the DeepSeek Harness composer after a task settles.",
+  "type": "module",
+  "license": "MIT",
+  "author": "lanxuewen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hixuewen/DeepSeek-Plugin.git",
+    "directory": "Quick-Command"
+  },
+  "homepage": "https://github.com/hixuewen/DeepSeek-Plugin/tree/main/Quick-Command#readme",
+  "bugs": {
+    "url": "https://github.com/hixuewen/DeepSeek-Plugin/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "quick-commands",
+    "composer"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}
