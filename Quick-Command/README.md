@@ -20,7 +20,7 @@ plugin_manager install_bundle target: "github:hixuewen/DeepSeek-Plugin#path:Quic
 
 `#path:Quick-Command` 不能省略：插件包位于仓库子目录，仓库根没有 `package.json`。
 
-安装后 bundle 默认启用。替换运行中的插件后通常需要重启 DSH 进程。想锁定版本时按仓库标签安装，例如 `github:hixuewen/DeepSeek-Plugin#v1.0.0&path:Quick-Command`。
+安装后 bundle 默认启用。替换运行中的插件后通常需要重启 DSH 进程。想锁定版本时按仓库标签安装，例如 `github:hixuewen/DeepSeek-Plugin#vX.Y.Z&path:Quick-Command`（把 `vX.Y.Z` 换成已发布的标签）。
 
 > 如果你之前用 `link:` 方式装过本地目录版本（旧包名 `@local/dsh-quick-commands`），请先在 Plugins 页移除它，再安装 GitHub 版本，避免两个同名 bundle 冲突。
 
