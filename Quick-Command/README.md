@@ -40,7 +40,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 - **无会话 / 空白会话不出现**：新建但还没发过消息的会话不会显示。
 - **与输入框对齐**：快捷行使用宿主输入框卡片的宽度变量，同宽居中显示在其正上方。
 
-## 默认命令
+## 预制命令
 
 | 按钮 | 发送给 Agent 的内容 |
 | --- | --- |
@@ -48,16 +48,18 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 | 继续 | `继续` |
 | 测试 | `测试` |
 
-## 自定义命令
+预制命令的文字固定，但可以在「管理」面板里删除；删除后永久消失，没有恢复入口（需要时清除站点数据，或编辑 `client.js` 顶部的 `BUILTIN` 后重新加载）。
 
-除内置的「提交 / 继续 / 测试」外，可以在界面上直接管理自定义命令：
+## 管理命令
+
+点「管理」后，面板按「预制命令 → 自定义命令」的顺序列出当前所有命令：
 
 - **添加**：点「+ 添加」，输入文字后按 `Enter` 或「确定」；`Esc` 或「取消」放弃。空内容和与已有命令重复的文字会被拒绝，最长 40 字。
-- **编辑**：点「管理」，在对应命令上点 `✎` 修改文字，`Enter` 保存、`Esc` 取消。
-- **排序**：在「管理」里用 `↑` / `↓` 调整顺序。
-- **删除**：点 `×` 移除。
+- **编辑**：自定义命令上点 `✎` 修改文字，`Enter` 保存、`Esc` 取消；预制命令不可编辑。
+- **排序**：自定义命令上点 `↑` / `↓` 调整顺序；预制命令顺序固定。
+- **删除**：任意命令上点 `×` 移除；预制命令删除后不会再出现。
 
-自定义命令保存在浏览器的 `localStorage`（键名 `dsh-quick-commands.custom`），刷新或重启 DSH 后仍在；它只属于当前浏览器配置，不同浏览器、设备或清除站点数据后不会保留。内置的三条命令固定不可改；如需修改默认命令，编辑 `client.js` 顶部的 `BUILTIN`。
+预制命令的删除记录保存在 `localStorage` 的 `dsh-quick-commands.hidden`，自定义命令保存在 `dsh-quick-commands.custom`。两者都只属于当前浏览器配置，刷新或重启 DSH 后仍在；换浏览器、换设备或清除站点数据后不会保留。
 
 ## 分发与发版
 
@@ -97,7 +99,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 | `conversation.input.dock` | session | 输入框卡片上方、与卡片同宽居中的条目，渲染快捷命令行 |
 
 - 可见性来自 `useSession()`（`running` / `blank` / `openState`）和 `useInput()`（`phase` / `draft`），只订阅需要的切片。
-- 自定义命令由模块级 store + `useSyncExternalStore` 在各会话实例间共享，写入 `localStorage`；监听 `storage` 事件做跨标签页同步。
+- 预制命令的删除记录与自定义命令各由一个模块级 store + `useSyncExternalStore` 在各会话实例间共享，写入 `localStorage`；监听 `storage` 事件做跨标签页同步。
 - 样式只使用宿主主题 token（`--dsw-alias-*`）与输入框宽度变量，明暗主题自动适配。
 - 不使用定时轮询，也不写宿主 DOM。
 

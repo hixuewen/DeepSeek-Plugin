@@ -12,9 +12,10 @@
  * - hidden while the composer holds a draft, so typing dismisses the row;
  * - once dismissed by typing it stays hidden until the next task settles.
  *
- * Built-in commands live in `BUILTIN` below. Additional commands can be added,
- * renamed, reordered and deleted from the row itself; they are persisted in
- * the browser's localStorage under `STORAGE_KEY`.
+ * Built-in commands live in `BUILTIN` below; custom ones are added from the row
+ * itself and can be renamed, reordered and deleted in the manage panel. Custom
+ * commands are persisted under `STORAGE_KEY`, and the ids of deleted built-ins
+ * under `HIDDEN_KEY`.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-quick-commands',
@@ -28,12 +29,16 @@ window.__ModuleLoader__.load({
     /** Where custom commands are persisted in the browser. */
     const STORAGE_KEY = 'dsh-quick-commands.custom';
 
+    /** Where the ids of deleted built-in commands are persisted. */
+    const HIDDEN_KEY = 'dsh-quick-commands.hidden';
+
     /** Longest accepted command text, in characters. */
     const MAX_LENGTH = 40;
 
     /**
      * Built-in commands: the label shown on the chip is also the exact prompt
-     * sent to the Agent. They are fixed and cannot be edited from the UI.
+     * sent to the Agent. Their text is fixed, but they can be deleted from the
+     * manage panel; a deleted id is remembered in `HIDDEN_KEY` and stays gone.
      */
     const BUILTIN = [
       { id: 'submit', text: '提交' },
@@ -55,7 +60,7 @@ window.__ModuleLoader__.load({
       'add.cancel': '取消',
       'manage.label': '管理',
       'manage.done': '完成',
-      'manage.empty': '还没有自定义命令，返回后点「+ 添加」新增一条。',
+      'manage.empty': '还没有快捷命令，返回后点「+ 添加」新增一条。',
       'manage.edit': '编辑',
       'manage.save': '保存',
       'manage.cancel': '取消',
@@ -77,7 +82,7 @@ window.__ModuleLoader__.load({
       'add.cancel': 'Cancel',
       'manage.label': 'Manage',
       'manage.done': 'Done',
-      'manage.empty': 'No custom commands yet. Go back and use “+ Add” to create one.',
+      'manage.empty': 'No quick commands yet. Go back and use “+ Add” to create one.',
       'manage.edit': 'Edit',
       'manage.save': 'Save',
       'manage.cancel': 'Cancel',
@@ -192,8 +197,36 @@ window.__ModuleLoader__.load({
         : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
     /**
+     * Read the ids of deleted built-in commands from localStorage, keeping only
+     * ids that still name a known built-in.
+     *
+     * @returns a fresh array of built-in ids, empty when nothing valid.
+     */
+    const readHidden = () => {
+      let parsed;
+      try {
+        const raw = window.localStorage.getItem(HIDDEN_KEY);
+        if (!raw) return [];
+        parsed = JSON.parse(raw);
+      } catch {
+        return [];
+      }
+      if (!Array.isArray(parsed)) return [];
+
+      const known = new Set(BUILTIN.map((command) => command.id));
+      const result = [];
+      for (const id of parsed) {
+        if (typeof id !== 'string' || !known.has(id) || result.includes(id)) {
+          continue;
+        }
+        result.push(id);
+      }
+      return result;
+    };
+
+    /**
      * Read custom commands from localStorage, tolerating missing or corrupt
-     * data, duplicates, and entries that collide with built-in commands.
+     * data, duplicates, and entries that collide with visible built-ins.
      *
      * @returns a fresh array of `{ id, text }`, empty when nothing valid.
      */
@@ -208,7 +241,9 @@ window.__ModuleLoader__.load({
       }
       if (!Array.isArray(parsed)) return [];
 
-      const seenTexts = new Set(BUILTIN.map((command) => command.text));
+      const seenTexts = new Set(
+        getVisibleBuiltin().map((command) => command.text),
+      );
       const seenIds = new Set();
       const result = [];
       for (const entry of parsed) {
@@ -230,14 +265,36 @@ window.__ModuleLoader__.load({
       return result;
     };
 
-    /** In-memory snapshot so `useSyncExternalStore` gets a stable reference. */
+    /**
+     * In-memory snapshots so `useSyncExternalStore` gets stable references:
+     * the custom list, the deleted built-in ids, and the built-ins still shown.
+     */
     let cache = null;
+    let hiddenCache = null;
+    let visibleBuiltinCache = null;
     const listeners = new Set();
 
     /** @returns the shared custom-command list. */
     const getCustom = () => {
       if (cache === null) cache = readStored();
       return cache;
+    };
+
+    /** @returns the ids of built-in commands the user deleted. */
+    const getHidden = () => {
+      if (hiddenCache === null) hiddenCache = readHidden();
+      return hiddenCache;
+    };
+
+    /** @returns the built-in commands that have not been deleted. */
+    const getVisibleBuiltin = () => {
+      if (visibleBuiltinCache === null) {
+        const hidden = new Set(getHidden());
+        visibleBuiltinCache = BUILTIN.filter(
+          (command) => !hidden.has(command.id),
+        );
+      }
+      return visibleBuiltinCache;
     };
 
     const notify = () => {
@@ -261,6 +318,25 @@ window.__ModuleLoader__.load({
     };
 
     /**
+     * Delete a built-in command for good.
+     *
+     * @param id - built-in id to hide.
+     */
+    const deleteBuiltin = (id) => {
+      if (!BUILTIN.some((command) => command.id === id)) return;
+      const hidden = getHidden();
+      if (hidden.includes(id)) return;
+      hiddenCache = [...hidden, id];
+      visibleBuiltinCache = null;
+      try {
+        window.localStorage.setItem(HIDDEN_KEY, JSON.stringify(hiddenCache));
+      } catch {
+        // Private mode or a full quota: keep working for this session.
+      }
+      notify();
+    };
+
+    /**
      * Subscribe to custom-command changes.
      *
      * @param listener - called after each change.
@@ -272,20 +348,28 @@ window.__ModuleLoader__.load({
     };
 
     /**
-     * Whether `text` collides with a built-in command or another custom one.
+     * Whether `text` collides with a visible command or another custom one.
      *
      * @param text - normalized candidate text.
      * @param excludeId - custom command being edited, ignored in the check.
      */
     const isDuplicate = (text, excludeId) =>
-      BUILTIN.some((command) => command.text === text) ||
+      getVisibleBuiltin().some((command) => command.text === text) ||
       getCustom().some(
         (command) => command.id !== excludeId && command.text === text,
       );
 
     // Keep the row in sync when another tab edits or clears the same list.
     window.addEventListener('storage', (event) => {
-      if (event.key !== STORAGE_KEY && event.key !== null) return;
+      if (
+        event.key !== STORAGE_KEY &&
+        event.key !== HIDDEN_KEY &&
+        event.key !== null
+      ) {
+        return;
+      }
+      hiddenCache = readHidden();
+      visibleBuiltinCache = null;
       cache = readStored();
       notify();
     });
@@ -307,6 +391,11 @@ window.__ModuleLoader__.load({
         (state) => state.openState === 'open' && !state.running && !state.blank,
       );
       const custom = React.useSyncExternalStore(subscribe, getCustom, getCustom);
+      const builtin = React.useSyncExternalStore(
+        subscribe,
+        getVisibleBuiltin,
+        getVisibleBuiltin,
+      );
 
       const [dismissed, setDismissed] = React.useState(false);
       const [adding, setAdding] = React.useState(false);
@@ -451,7 +540,7 @@ window.__ModuleLoader__.load({
         return h(
           'button',
           {
-            key: command.id,
+            key: `${isCustom ? 'c' : 'b'}:${command.id}`,
             type: 'button',
             className: 'dsh-quick-commands__chip',
             title: hint,
@@ -467,7 +556,7 @@ window.__ModuleLoader__.load({
 
       const renderChipRow = () => {
         const chips = [
-          ...BUILTIN.map((command) => renderChip(command, false)),
+          ...builtin.map((command) => renderChip(command, false)),
           ...custom.map((command) => renderChip(command, true)),
         ];
 
@@ -542,7 +631,7 @@ window.__ModuleLoader__.load({
           );
         }
 
-        if (custom.length > 0) {
+        if (builtin.length + custom.length > 0) {
           chips.push(
             h(
               'button',
@@ -567,11 +656,44 @@ window.__ModuleLoader__.load({
         return chips;
       };
 
+      /** One small icon button used by every manage row. */
+      const iconButton = (label, glyph, onClick, disabled) =>
+        h(
+          'button',
+          {
+            type: 'button',
+            className: 'dsh-quick-commands__icon-button',
+            title: label,
+            'aria-label': label,
+            disabled,
+            onClick,
+          },
+          glyph,
+        );
+
+      /** A built-in row keeps its fixed text and offers deletion only. */
+      const renderBuiltinRow = (command) =>
+        h(
+          'div',
+          { className: 'dsh-quick-commands__row', key: `b:${command.id}` },
+          h(
+            'span',
+            { className: 'dsh-quick-commands__row-text', title: command.text },
+            command.text,
+          ),
+          iconButton(
+            t('manage.delete'),
+            '×',
+            () => deleteBuiltin(command.id),
+            false,
+          ),
+        );
+
       const renderManagerRow = (command, index) => {
         if (command.id === editingId) {
           return h(
             'div',
-            { className: 'dsh-quick-commands__row', key: command.id },
+            { className: 'dsh-quick-commands__row', key: `c:${command.id}` },
             h('input', {
               className: 'dsh-quick-commands__input',
               value: editText,
@@ -615,23 +737,9 @@ window.__ModuleLoader__.load({
           );
         }
 
-        const iconButton = (label, glyph, onClick, disabled) =>
-          h(
-            'button',
-            {
-              type: 'button',
-              className: 'dsh-quick-commands__icon-button',
-              title: label,
-              'aria-label': label,
-              disabled,
-              onClick,
-            },
-            glyph,
-          );
-
         return h(
           'div',
-          { className: 'dsh-quick-commands__row', key: command.id },
+          { className: 'dsh-quick-commands__row', key: `c:${command.id}` },
           h(
             'span',
             { className: 'dsh-quick-commands__row-text', title: command.text },
@@ -667,13 +775,13 @@ window.__ModuleLoader__.load({
             role: 'group',
             'aria-label': t('manage.label'),
           },
-          custom.length === 0
+          builtin.length + custom.length === 0
             ? h(
                 'span',
                 { className: 'dsh-quick-commands__empty' },
                 t('manage.empty'),
               )
-            : custom.map(renderManagerRow),
+            : [builtin.map(renderBuiltinRow), custom.map(renderManagerRow)],
           h(
             'div',
             { className: 'dsh-quick-commands__panel-footer' },
