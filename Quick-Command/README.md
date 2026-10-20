@@ -46,7 +46,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 | --- | --- |
 | 提交 | `提交` |
 | 继续 | `继续` |
-| 测试 | `测试` |
+| 确认 | `确认` |
 
 预制命令的文字固定，但可以在「管理」面板里删除；删除后永久消失，没有恢复入口（需要时清除站点数据，或编辑 `client.js` 顶部的 `BUILTIN` 后重新加载）。
 

@@ -43,7 +43,7 @@ window.__ModuleLoader__.load({
     const BUILTIN = [
       { id: 'submit', text: '提交' },
       { id: 'continue', text: '继续' },
-      { id: 'test', text: '测试' },
+      { id: 'confirm', text: '确认' },
     ];
 
     /** UI copy, translated through the Client locale service. */
@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
       'group.label': '快捷命令',
       'hint.submit': '把「提交」发送给 Agent，执行代码提交',
       'hint.continue': '把「继续」发送给 Agent，继续推进当前任务',
-      'hint.test': '把「测试」发送给 Agent，运行测试',
+      'hint.confirm': '把「确认」发送给 Agent，确认当前操作',
       'hint.custom': '点击把这条自定义命令发送给 Agent',
       'add.label': '添加',
       'add.hint': '手动添加一条快捷命令',
@@ -73,7 +73,7 @@ window.__ModuleLoader__.load({
       'group.label': 'Quick commands',
       'hint.submit': 'Send “提交” to the agent to commit the code',
       'hint.continue': 'Send “继续” to the agent to continue the current task',
-      'hint.test': 'Send “测试” to the agent to run the tests',
+      'hint.confirm': 'Send “确认” to the agent to confirm the current step',
       'hint.custom': 'Send this custom command to the agent',
       'add.label': 'Add',
       'add.hint': 'Add a custom quick command',
