@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Quick Commands",
-    "description": "Shows one-click command chips above the composer after a task settles. Clicking a chip sends that prompt to the agent; typing dismisses them. Built-in and custom commands can both be deleted in place, and custom ones can be added, edited and reordered."
+    "description": "Shows one-click command chips above the composer after a task settles. Clicking a chip sends that prompt to the agent; typing dismisses them. A leading suggestion is extracted from the agent's latest question, and built-in and custom commands can both be deleted, with custom ones added, edited and reordered."
   }
 }

@@ -2,6 +2,8 @@
 
 任务执行完成后，在输入框上方浮出一排快捷命令。点一下，按钮上的文字会直接作为消息发送给 Agent——比如点「提交」，等同于你在输入框里敲下「提交」并回车。
 
+最前面还会自动出现一条「下一步建议」：从 Agent 最后一条回答的收尾提问里提取动作。比如 Agent 说“直接说「继续修复编译」即可”，这一条就会作为建议 chip 排在所有命令之前，点一下即发送「继续修复编译」。建议是临时推导出来的，不写入你的命令列表。
+
 ## 安装
 
 ### 从 GitHub 安装（推荐）
@@ -35,6 +37,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 ## 行为
 
 - **任务完成后出现**：当前会话处于空闲（Agent 不在运行、会话已有内容）时显示；运行中自动收起。
+- **下一步建议置顶**：任务完成后，从 Agent 最后一条回答的收尾提问中提取动作，作为品牌色描边的箭头 chip 排在最前面；每轮回答后自动更新，提取不到或与已有命令重复时隐藏。它只存在于当前渲染中，不写入 `localStorage`，也不出现在管理面板。
 - **点一下即发送**：通过公开的 `InputActions.setDraft()` 写入按钮文字，再调用 `InputActions.submit()` 提交，与手动输入后回车走同一条提交链路。
 - **输入文字即收起**：输入框里一旦有草稿（包括手动输入、粘贴、`@` 引用等），快捷行立即隐藏；这次输入期间不再出现，直到下一轮任务完成后重新可用。
 - **无会话 / 空白会话不出现**：新建但还没发过消息的会话不会显示。
@@ -49,6 +52,33 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 | 确认 | `确认` |
 
 预制命令的文字固定，但可以在「管理」面板里删除；删除后永久消失，没有恢复入口（需要时清除站点数据，或编辑 `client.js` 顶部的 `BUILTIN` 后重新加载）。
+
+## 下一步建议
+
+快捷行最前面的那条建议不需要配置，它来自当前会话最后一条 Assistant 消息的收尾提问。提取在浏览器内完成，不额外调用模型，也不改变你的命令列表。
+
+支持的常见写法：
+
+| Agent 的收尾句 | 建议 chip |
+| --- | --- |
+| `需要我继续把工程修到可编译状态的话，直接说“继续修复编译”即可。` | `继续修复编译` |
+| `如果需要我继续修复，请回复「继续修复编译」。` | `继续修复编译` |
+| `` 如果要继续，直接说 `npm test` 即可 `` | `npm test` |
+| `直接回复 **继续修复编译**` | `继续修复编译` |
+| `直接回复：继续修复编译` | `继续修复编译` |
+| `需要我继续把工程修到可编译状态吗？` | `继续把工程修到可编译状态` |
+| `需要我继续修复吗？` | `继续修复` |
+| `要继续吗？` / `是否继续？` | `继续` |
+| `If you'd like me to continue, reply "continue".` | `continue` |
+| `Should I proceed with the fix?` | `Proceed with the fix` |
+
+规则与边界：
+
+- 只读取最后一条带文字的 Assistant 消息，并从最后一句往前找；更早的回合不参与，避免把已经回答过的问题又提出来。
+- 优先取“说 / 回复 / 回答 / 输入 / 发送 / say / reply / answer”等指令词后面、被 `“”`、`「」`、`『』`、反引号或 `**` 包住的动作；也接受引号后跟“即可 / 就行”，或以冒号直接给出回复的写法。
+- 没有引号时，退而解析“需要我……吗 / 要不要……吗 / 是否…… / Should I……?”这类问句，取其中的动作短语。
+- 结果会去掉引号、加粗符号和句末标点，最长 40 字；超长、纯标点、与现有预制或自定义命令完全相同的动作不会显示。
+- 纯启发式匹配，不保证覆盖所有措辞；提不出可靠动作时这一条直接不出现，不会把整段回答当成命令塞进来。
 
 ## 管理命令
 
@@ -90,7 +120,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 
 - 已在 DeepSeek Harness `0.2.1-rc.2` 上验证。
 - `package.json` 通过 `engines.dsh` 声明 `>=0.2.1-rc.2 <0.3.0`；不满足时安装会被拒绝。
-- 依赖宿主提供的 `conversation.input.dock` 插槽与 `InputActions.setDraft/submit()`，不引入任何运行时依赖。
+- 依赖宿主提供的 `conversation.input.dock` 插槽、`InputActions.setDraft/submit()` 与 Session 作用域插槽的 `useChat()` 快照，不引入任何运行时依赖。
 
 ## 实现结构
 
@@ -99,6 +129,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 | `conversation.input.dock` | session | 输入框卡片上方、与卡片同宽居中的条目，渲染快捷命令行 |
 
 - 可见性来自 `useSession()`（`running` / `blank` / `openState`）和 `useInput()`（`phase` / `draft`），只订阅需要的切片。
+- 下一步建议用插槽自带的 `useChat()` 订阅 `legacy.nodes`，只把“最后一条 Assistant 文本”作为 selector 结果；提取函数是纯函数，文本不变就不重新计算，也不轮询。
 - 预制命令的删除记录与自定义命令各由一个模块级 store + `useSyncExternalStore` 在各会话实例间共享，写入 `localStorage`；监听 `storage` 事件做跨标签页同步。
 - 样式只使用宿主主题 token（`--dsw-alias-*`）与输入框宽度变量，明暗主题自动适配。
 - 不使用定时轮询，也不写宿主 DOM。
@@ -113,7 +144,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 package.json          包清单 + dsh.bundle / dsh.client / engines 声明
 cordis.patch.yml      插入插件行（id: quick-commands）
 index.js              Host 半边：不注册任何东西（纯浏览器行为）
-client.js             浏览器半边：快捷命令行、自定义命令管理与发送逻辑
+client.js             浏览器半边：快捷命令行、下一步建议提取、自定义命令管理与发送逻辑
 locale/zh.json        插件展示元数据（中文）
 locale/en.json        插件展示元数据（英文）
 icon.svg              图标

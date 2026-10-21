@@ -16,6 +16,12 @@
  * itself and can be renamed, reordered and deleted in the manage panel. Custom
  * commands are persisted under `STORAGE_KEY`, and the ids of deleted built-ins
  * under `HIDDEN_KEY`.
+ *
+ * The leading chip is not stored: it is derived from the Agent's latest answer.
+ * When that answer ends by asking the user to reply with an exact action — for
+ * example "直接说「继续修复编译」即可" — the action becomes a suggestion chip
+ * in front of every built-in and custom command. It follows each new answer and
+ * disappears when no action can be extracted.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-quick-commands',
@@ -53,6 +59,8 @@ window.__ModuleLoader__.load({
       'hint.continue': '把「继续」发送给 Agent，继续推进当前任务',
       'hint.confirm': '把「确认」发送给 Agent，确认当前操作',
       'hint.custom': '点击把这条自定义命令发送给 Agent',
+      'hint.suggestion':
+        '从 Agent 最后一条回答的提问里提取的下一步动作，点击直接发送',
       'add.label': '添加',
       'add.hint': '手动添加一条快捷命令',
       'add.placeholder': '输入命令文字',
@@ -75,6 +83,8 @@ window.__ModuleLoader__.load({
       'hint.continue': 'Send “继续” to the agent to continue the current task',
       'hint.confirm': 'Send “确认” to the agent to confirm the current step',
       'hint.custom': 'Send this custom command to the agent',
+      'hint.suggestion':
+        'The next action extracted from the agent’s last question. Click to send it',
       'add.label': 'Add',
       'add.hint': 'Add a custom quick command',
       'add.placeholder': 'Command text',
@@ -130,6 +140,17 @@ window.__ModuleLoader__.load({
       '}',
       '.dsh-quick-commands__chip--ghost{background:transparent;border-style:dashed;}',
       '.dsh-quick-commands__chip--ghost:hover{background:var(--dsw-alias-bg-layer-1);}',
+      '.dsh-quick-commands__chip--suggestion{',
+      'color:var(--dsw-alias-brand-primary);',
+      'border-color:var(--dsw-alias-brand-primary);',
+      'background:var(--dsw-alias-bg-layer-1);',
+      '}',
+      '.dsh-quick-commands__chip--suggestion:hover{',
+      'color:var(--dsw-alias-brand-primary);',
+      'background:var(--dsw-alias-bg-layer-2);',
+      'border-color:var(--dsw-alias-brand-primary);',
+      '}',
+      '.dsh-quick-commands__chip--suggestion .dsh-quick-commands__icon{opacity:1;}',
       '.dsh-quick-commands__icon{display:inline-flex;flex:none;opacity:.85;}',
       '.dsh-quick-commands__editor{display:inline-flex;align-items:center;gap:6px;}',
       '.dsh-quick-commands__input{',
@@ -195,6 +216,227 @@ window.__ModuleLoader__.load({
       typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
         ? crypto.randomUUID()
         : `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+    /* --- leading suggestion: pure extraction helpers --------------------- */
+
+    /**
+     * Quote pairs that may wrap the exact text the Agent asks for. Bold markers
+     * are included because Agents often emphasize the reply instead of quoting
+     * it with CJK brackets.
+     */
+    const QUOTE_PAIRS = [
+      ['“', '”'],
+      ['"', '"'],
+      ['「', '」'],
+      ['『', '』'],
+      ['`', '`'],
+      ['**', '**'],
+    ];
+
+    /** A directive that introduces the exact reply the user should send. */
+    const DIRECTIVE_BEFORE =
+      /(?:^|[，,：:；;]\s*)(?:(?:直接|只需|只需要|只要|请|就|可以|再|然后|接着|麻烦|你|您)\s*)*(?:说|回复|回答|输入|发送|告诉我|跟我说|叫我|say|reply|answer|type|send|confirm|respond)(?:\s*(?:我|with|me|that|the word))?\s*(?:[：:，,]\s*)?(?:一?句|一下)?\s*$/i;
+
+    /** Text after a quoted action that marks it as the reply the Agent wants. */
+    const CONFIRM_AFTER =
+      /^\s*(?:即可|就行|就可以|就可以了|便可|即开始|就开始|然后继续|then)/i;
+
+    /** A question frame that introduces a quoted choice. */
+    const ASK_BEFORE =
+      /(?:是否|要不要|需不需要|是否需要|需要|要我|能否)[^。！？!?\n]{0,24}$/;
+
+    /** Verbs that make a short quoted phrase plausible as the next action. */
+    const LOOKS_LIKE_ACTION =
+      /^(?:继续|接着|修复|修改|运行|执行|提交|确认|部署|重试|再试|安装|更新|删除|回滚|构建|编译|测试|启动|重启|apply|commit|deploy|fix|run|retry|rebuild|test|continue|proceed|start|install|update|delete|revert|reset)/i;
+
+    /** Whether one sentence is phrased as a question. */
+    const isQuestion = (sentence) =>
+      /[？?]\s*$/.test(sentence) || /[吗么嘛呢][。！!]?\s*$/.test(sentence);
+
+    /**
+     * Find every quoted span in one sentence.
+     *
+     * @param sentence - single sentence to scan.
+     * @returns spans `{ start, end, value }` sorted by position.
+     */
+    const collectQuotes = (sentence) => {
+      const spans = [];
+      for (const [open, close] of QUOTE_PAIRS) {
+        let from = 0;
+        for (;;) {
+          const start = sentence.indexOf(open, from);
+          if (start < 0) break;
+          const end = sentence.indexOf(close, start + open.length);
+          if (end < 0) break;
+          const value = sentence.slice(start + open.length, end).trim();
+          if (value) spans.push({ start, end: end + close.length, value });
+          from = end + close.length;
+        }
+      }
+      return spans.sort((left, right) => left.start - right.start);
+    };
+
+    /**
+     * Turn a raw quoted or captured phrase into an acceptable command.
+     *
+     * @param raw - candidate action text.
+     * @returns the cleaned command, or an empty string when it is unusable.
+     */
+    const cleanAction = (raw) => {
+      const value = String(raw ?? '')
+        .replace(/\s*\r?\n\s*/g, ' ')
+        .trim()
+        .replace(/^[*`"'“”「」『』\s]+/u, '')
+        .replace(/[*`"'“”「」『』\s]+$/u, '')
+        .replace(/["“”「」『』`]|\*\*/gu, '')
+        .replace(/[。.！!；;，,、：:]+$/u, '')
+        .replace(/\s+/gu, ' ')
+        .trim();
+
+      if (!value || value.length > MAX_LENGTH) return '';
+      if (!/[0-9A-Za-z\u00C0-\u024F\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/u.test(value)) {
+        return '';
+      }
+      if (/[？?]$/u.test(value)) return '';
+      return value;
+    };
+
+    /**
+     * Extract an action from one sentence: an explicitly quoted reply first,
+     * then a colon-introduced reply, then a short Chinese or English question.
+     *
+     * @param sentence - trimmed sentence to inspect.
+     * @param question - whether the sentence is phrased as a question.
+     * @returns the extracted command, or an empty string.
+     */
+    const extractFromSentence = (sentence, question) => {
+      let best = '';
+      for (const span of collectQuotes(sentence)) {
+        const before = sentence.slice(0, span.start);
+        const after = sentence.slice(span.end, span.end + 12);
+        const directed = DIRECTIVE_BEFORE.test(before);
+        const confirmed = CONFIRM_AFTER.test(after);
+        const asked =
+          question && !directed && !confirmed && ASK_BEFORE.test(before);
+        if (!directed && !confirmed && !asked) continue;
+        const action = cleanAction(span.value);
+        if (!action) continue;
+        if (asked && !LOOKS_LIKE_ACTION.test(action)) continue;
+        best = action;
+      }
+      if (best) return best;
+
+      const bare = sentence
+        .trim()
+        .match(
+          /^(?:(?:可以|请|直接|你|您|麻烦)\s*)*(?:回复|回答|输入|发送)[：:]\s*([^\n]{1,40})$/u,
+        );
+      if (bare) {
+        const action = cleanAction(bare[1]);
+        if (action) return action;
+      }
+
+      const bareEnglish = sentence
+        .trim()
+        .match(/^(?:please\s+)?(?:reply|answer|type|send)\s*[:：]\s*(.{1,40})$/iu);
+      if (bareEnglish) {
+        const action = cleanAction(bareEnglish[1]);
+        if (action) return action;
+      }
+
+      if (!question) return '';
+
+      const chinese = sentence
+        .trim()
+        .match(
+          /^(?:请问[，,]?)?(?:是否(?:要)?|需不需要|需要|要不要|要)(?:我|我们)?(.{1,40}?)(?:吗|么|嘛|呢)?[？?]?$/u,
+        );
+      if (chinese) {
+        const action = cleanAction(chinese[1]);
+        if (action) return action;
+      }
+
+      const trimmed = sentence.trim();
+      if (/^(?:继续|接着|往下)(?:吗|么|嘛|呢)?[？?]?$/u.test(trimmed)) {
+        return '继续';
+      }
+      if (/^(?:确认|可以|行|好|没问题)(?:吗|么|嘛|呢)?[？?]?$/u.test(trimmed)) {
+        return trimmed.replace(/[吗么嘛呢？?。！!]+$/u, '').trim();
+      }
+
+      const english = trimmed.match(
+        /^(?:should|shall|do you want me to|would you like me to|may i|can i)\s+(?:(?:i|we)\s+)?(.{1,40}?)[？?]?$/iu,
+      );
+      if (english) {
+        const action = cleanAction(english[1]);
+        if (action) return action.charAt(0).toUpperCase() + action.slice(1);
+      }
+      return '';
+    };
+
+    /**
+     * Extract the action requested by the final question in an Agent answer.
+     * Sentences are scanned from the end so the last ask wins.
+     *
+     * @param text - the latest assistant prose.
+     * @returns the cleanup command, or an empty string when none is found.
+     */
+    const extractAction = (text) => {
+      const source = String(text ?? '').replace(
+        /([.!?])\s+(?=[A-Z])/gu,
+        '$1\n',
+      );
+      if (!source) return '';
+      const sentences = source.match(/[^。！？!?；;\n]+[。！？!?；;]?/gu) || [];
+      for (let index = sentences.length - 1; index >= 0; index -= 1) {
+        const sentence = sentences[index].trim();
+        if (!sentence) continue;
+        const action = extractFromSentence(sentence, isQuestion(sentence));
+        if (action) return action;
+      }
+      return '';
+    };
+
+    /**
+     * Join the prose blocks of one finalized assistant message.
+     *
+     * @param node - a Conversation node from the Chat snapshot.
+     * @returns its text blocks joined by newlines, or an empty string.
+     */
+    const assistantTextOf = (node) => {
+      if (!node || node.kind !== 'assistant' || !Array.isArray(node.blocks)) {
+        return '';
+      }
+      let text = '';
+      for (const block of node.blocks) {
+        if (
+          block &&
+          block.kind === 'text' &&
+          typeof block.text === 'string' &&
+          block.text.trim()
+        ) {
+          text += (text ? '\n' : '') + block.text;
+        }
+      }
+      return text;
+    };
+
+    /**
+     * The prose of the latest assistant message that carries text.
+     *
+     * @param nodes - Conversation nodes loaded for the current Session.
+     * @returns the latest assistant prose, or an empty string.
+     */
+    const latestAssistantText = (nodes) => {
+      if (!Array.isArray(nodes)) return '';
+      for (let index = nodes.length - 1; index >= 0; index -= 1) {
+        const text = assistantTextOf(nodes[index]);
+        if (text) return text;
+      }
+      return '';
+    };
+
+    /* --- end leading suggestion helpers --------------------------------- */
 
     /**
      * Read the ids of deleted built-in commands from localStorage, keeping only
@@ -396,6 +638,9 @@ window.__ModuleLoader__.load({
         getVisibleBuiltin,
         getVisibleBuiltin,
       );
+      const lastAnswer = props.useChat((state) =>
+        latestAssistantText(state.legacy.nodes),
+      );
 
       const [dismissed, setDismissed] = React.useState(false);
       const [adding, setAdding] = React.useState(false);
@@ -406,6 +651,14 @@ window.__ModuleLoader__.load({
       const wasRunning = React.useRef(running);
 
       const visible = canAccept && idle && !dismissed;
+
+      // The leading chip is derived, never stored: the latest answer's final
+      // question decides it, and it is hidden when it duplicates a command.
+      const suggestion = React.useMemo(() => {
+        if (!visible) return '';
+        const action = extractAction(lastAnswer);
+        return action && !isDuplicate(action) ? action : '';
+      }, [visible, lastAnswer, builtin, custom]);
 
       // Typing (or any programmatic draft) dismisses the row immediately.
       React.useEffect(() => {
@@ -529,36 +782,71 @@ window.__ModuleLoader__.load({
         ),
       );
 
+      /** An arrow that marks the derived next-step suggestion. */
+      const suggestionIcon = h(
+        'span',
+        { className: 'dsh-quick-commands__icon', 'aria-hidden': true },
+        h(
+          'svg',
+          {
+            width: 12,
+            height: 12,
+            viewBox: '0 0 16 16',
+            fill: 'none',
+            xmlns: 'http://www.w3.org/2000/svg',
+          },
+          h('path', {
+            d: 'M2.5 8h9.5M8.5 4.5 12 8l-3.5 3.5',
+            stroke: 'currentColor',
+            strokeWidth: 1.6,
+            strokeLinecap: 'round',
+            strokeLinejoin: 'round',
+          }),
+        ),
+      );
+
       /**
        * Render one command chip.
        *
        * @param command - `{ id, text }` to display and send.
-       * @param isCustom - custom commands get a generic tooltip.
+       * @param kind - `builtin`, `custom`, or the derived `suggestion`.
        */
-      const renderChip = (command, isCustom) => {
-        const hint = isCustom ? t('hint.custom') : t(`hint.${command.id}`);
+      const renderChip = (command, kind) => {
+        const hint =
+          kind === 'suggestion'
+            ? t('hint.suggestion')
+            : kind === 'custom'
+              ? t('hint.custom')
+              : t(`hint.${command.id}`);
         return h(
           'button',
           {
-            key: `${isCustom ? 'c' : 'b'}:${command.id}`,
+            key: `${kind === 'builtin' ? 'b' : kind === 'custom' ? 'c' : 's'}:${command.id}`,
             type: 'button',
-            className: 'dsh-quick-commands__chip',
+            className:
+              kind === 'suggestion'
+                ? 'dsh-quick-commands__chip dsh-quick-commands__chip--suggestion'
+                : 'dsh-quick-commands__chip',
             title: hint,
             onClick: (event) => {
               event.preventDefault();
               run(command.text);
             },
           },
-          chipIcon,
+          kind === 'suggestion' ? suggestionIcon : chipIcon,
           h('span', null, command.text),
         );
       };
 
       const renderChipRow = () => {
-        const chips = [
-          ...builtin.map((command) => renderChip(command, false)),
-          ...custom.map((command) => renderChip(command, true)),
-        ];
+        const chips = [];
+        if (suggestion) {
+          chips.push(renderChip({ id: 'next', text: suggestion }, 'suggestion'));
+        }
+        chips.push(
+          ...builtin.map((command) => renderChip(command, 'builtin')),
+          ...custom.map((command) => renderChip(command, 'custom')),
+        );
 
         if (adding) {
           chips.push(
