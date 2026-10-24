@@ -1,8 +1,8 @@
 {
   "name": "dsh-quick-commands",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": false,
-  "description": "One-click quick commands above the DeepSeek Harness composer, with a next-step suggestion extracted from the agent's latest answer — quoted replies, one-word confirmations such as '你只需要确认一句：「写这个工具」', and waiting statements such as '登录完成后告诉我'.",
+  "description": "One-click quick commands above the DeepSeek Harness composer, with a next-step suggestion extracted from the agent's latest answer — quoted replies, offers such as '需要我发版的话说一声', waiting statements such as '登录完成后告诉我', and an optional model-backed extractor that reuses the deployment's default model.",
   "type": "module",
   "license": "MIT",
   "author": "lanxuewen",

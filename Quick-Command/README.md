@@ -2,7 +2,7 @@
 
 任务执行完成后，在输入框上方浮出一排快捷命令。点一下，按钮上的文字会直接作为消息发送给 Agent——比如点「提交」，等同于你在输入框里敲下「提交」并回车。新建但还没发过消息的会话不显示这一排：此时没有对话上下文，一键回复没有可承接的内容，等第一轮对话结束后它才出现。
 
-最前面还会自动出现一条「下一步建议」：从 Agent 最后一条回答里提取动作。除有问号的收尾提问外，它也会读懂“登录完成后告诉我，我读取结果”这类没有问号的等待条件，并生成「登录完成」，以及“需要我发版的话说一声”这种提出代做的收尾句，生成「发版」。比如 Agent 说“直接说「继续修复编译」即可”，或“你只需要确认一句：「写这个工具」”，这一条就会作为建议 chip 排在所有命令之前，点一下即发送「继续修复编译」/「写这个工具」。建议是临时推导出来的，不写入你的命令列表。
+最前面还会自动出现一条「下一步建议」：从 Agent 最后一条回答里提取动作。除有问号的收尾提问外，它也会读懂“登录完成后告诉我，我读取结果”这类没有问号的等待条件，并生成「登录完成」，以及“需要我发版的话说一声”这种提出代做的收尾句，生成「发版」。比如 Agent 说“直接说「继续修复编译」即可”，或“你只需要确认一句：「写这个工具」”，这一条就会作为建议 chip 排在所有命令之前，点一下即发送「继续修复编译」/「写这个工具」。建议是临时推导出来的，不写入你的命令列表。本地规则是启发式的；打开「管理」里的「AI 解析建议」后，会改用 DSH 当前默认模型理解最后一条回答（默认关闭，见下文「AI 解析」）。
 
 ## 安装
 
@@ -39,6 +39,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 - **会话空闲且已有对话时出现**：当前会话打开、Agent 不在运行、输入框里没有草稿时显示；运行中自动收起。
 - **新会话与首页欢迎页不显示**：新建但还没发过消息的空白会话没有对话上下文，快捷行保持隐藏，首轮对话结束后出现；DSH 启动后连空白会话都还没创建时，宿主不渲染这个插槽，同样没有快捷行。
 - **下一步建议置顶**：任务完成后，从 Agent 最后一条回答里提取动作，作为品牌色描边的箭头 chip 排在最前面；每轮回答后自动更新，提取不到或与已有命令重复时隐藏。它只存在于当前渲染中，不写入 `localStorage`，也不出现在管理面板。
+- **AI 解析（可选）**：打开开关后，建议改由 DSH 默认模型判断，模型返回的短句替换本地规则结果；失败、超时或接口不可用时自动回退本地规则。开关状态写入 `localStorage` 的 `dsh-quick-commands.ai`。
 - **点一下即发送**：通过公开的 `InputActions.setDraft()` 写入按钮文字，再调用 `InputActions.submit()` 提交，与手动输入后回车走同一条提交链路。
 - **输入文字即收起**：输入框里一旦有草稿（包括手动输入、粘贴、`@` 引用等），快捷行立即隐藏；这次输入期间不再出现，直到下一轮任务完成后重新可用。
 - **与输入框对齐**：快捷行使用宿主输入框卡片的宽度变量，同宽居中显示在其正上方。
@@ -98,9 +99,19 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 - 结果会去掉引号、加粗符号和句末标点，最长 40 字；超长、纯标点、与现有预制或自定义命令完全相同的动作不会显示。以 `@` 开头的引用本身（例如 `@Quick-Command/`）不是一句回复，不会被提取成建议。
 - 纯启发式匹配，不保证覆盖所有措辞；提不出可靠动作时这一条直接不出现，不会把整段回答当成命令塞进来。
 
+## AI 解析（可选）
+
+「管理」面板顶部有「AI 解析建议」开关，默认关闭。打开后：
+
+- 每次新的 Assistant 回答都会请求宿主接口 `POST /plugins/dsh-quick-commands/analyze`。接口使用 DSH 当前的默认模型（与聊天同一条路由和凭证），不需要另填 API key，且只接受已登录的同源请求。
+- 模型只回答“用户该回哪一句”，返回的短句替换本地规则的结果；模型判断不需要回复时，这条建议直接不出现。
+- 同一条回答只请求一次（内存缓存 20 条）；失败、超时（宿主 8 秒）或宿主接口不可用时回退本地规则，不影响其他快捷命令。
+- 开启后，最后一条回答的文本会发送给模型服务；关闭时不会发出任何请求。
+- 宿主接口由 `index.js` 注册。修改 `index.js` 需要重启 DSH 进程才生效；`client.js` 的改动由 HMR 重载。
+
 ## 管理命令
 
-点「管理」后，面板按「预制命令 → 自定义命令」的顺序列出当前所有命令：
+点「管理」后，面板顶部是「AI 解析建议」开关，下面按「预制命令 → 自定义命令」的顺序列出当前所有命令：
 
 - **添加**：点「+ 添加」，输入文字后按 `Enter` 或「确定」；`Esc` 或「取消」放弃。空内容和与已有命令重复的文字会被拒绝，最长 40 字。
 - **编辑**：自定义命令上点 `✎` 修改文字，`Enter` 保存、`Esc` 取消；预制命令不可编辑。
@@ -111,14 +122,14 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 
 ## 测试
 
-提取逻辑是 `client.js` 里的纯函数。测试用 Node 22 自带 runner，把 `client.js` 中标记为“leading suggestion”的纯函数段落求值后直接断言，不启动浏览器、不 mock 任何东西：
+提取逻辑是 `client.js` 里的纯函数，Host 端的模型调用与回复清洗在 `index.js`。测试用 Node 22 自带 runner：`test/suggestion.test.mjs` 把 `client.js` 中标记为“leading suggestion”的纯函数段落求值后直接断言；`test/analyze.test.mjs` 直接 `import` `index.js`，用假的 `ctx` 模拟模型流。两者都不启动浏览器、不访问网络：
 
 ```bash
 cd Quick-Command
 npm test
 ```
 
-新增措辞时先补一条用例（`test/suggestion.test.mjs`），确认它在旧实现上失败，再改 `client.js`。
+新增措辞时先补一条用例，确认它在旧实现上失败，再改对应源码。
 
 ## 分发与发版
 
@@ -150,16 +161,19 @@ npm test
 - 已在 DeepSeek Harness `0.2.1-rc.2` 上验证。
 - `package.json` 通过 `engines.dsh` 声明 `>=0.2.1-rc.2 <0.3.0`；不满足时安装会被拒绝。
 - 依赖宿主提供的 `conversation.input.dock` 插槽、`InputActions.setDraft/submit()` 与 Session 作用域插槽的 `useChat()` 快照，不引入任何运行时依赖。
+- AI 解析依赖 web profile 的 `webServer`、`connection`、`llm` 与 `agentDefaultModel` 服务，以及已配置的默认模型；在 CLI / ACP 等没有 Web 服务的 profile 下接口不注册，插件继续按本地规则工作。修改 `index.js` 后需要重启 DSH。
 
 ## 实现结构
 
 | 插槽 | 作用域 | 内容 |
 | --- | --- | --- |
 | `conversation.input.dock` | session | 输入框卡片上方、与卡片同宽居中的条目，渲染快捷命令行 |
+| `POST /plugins/dsh-quick-commands/analyze` | host | 同源、鉴权的分析接口，用默认模型把最后一条回答提取成一句回复 |
 
 - 可见性来自 `useSession()`（`running` / `openState` / `blank`）和 `useInput()`（`phase` / `draft`），只订阅需要的切片；宿主的 `blank`（新会话标记）为真时整行不渲染，首轮对话结束后随 `blank` 变为 `false` 自动出现。
 - 下一步建议用插槽自带的 `useChat()` 订阅 `legacy.nodes`，只把“最后一条 Assistant 文本”作为 selector 结果；提取函数是纯函数，文本不变就不重新计算，也不轮询。先找引号动作、冒号后的短回复和问句，再回退到“完成后告诉我”这类等待条件。
-- 预制命令的删除记录与自定义命令各由一个模块级 store + `useSyncExternalStore` 在各会话实例间共享，写入 `localStorage`；监听 `storage` 事件做跨标签页同步。
+- 开启 AI 解析时，客户端在回答变化后向同源接口发一次请求（`AbortController` 超时、按回答文本缓存 20 条），模型返回前先显示本地结果；失败、404 或超时回退本地结果。Host 端用 `agentDefaultModel.currentSelection()` 选路、`ctx.llm.stream()` 调用，`maxTokens` 96、超时 8 秒。
+- 预制命令的删除记录与自定义命令各由一个模块级 store + `useSyncExternalStore` 在各会话实例间共享，写入 `localStorage`；监听 `storage` 事件做跨标签页同步。AI 开关同样走这套 store。
 - 样式只使用宿主主题 token（`--dsw-alias-*`）与输入框宽度变量，明暗主题自动适配。
 - 不使用定时轮询，也不写宿主 DOM。
 
@@ -172,9 +186,10 @@ npm test
 ```
 package.json          包清单 + dsh.bundle / dsh.client / engines 声明
 cordis.patch.yml      插入插件行（id: quick-commands）
-index.js              Host 半边：不注册任何东西（纯浏览器行为）
-client.js             浏览器半边：快捷命令行、下一步建议提取、自定义命令管理与发送逻辑
+index.js              Host 半边：注册同源分析接口，用默认模型提取回复
+client.js             浏览器半边：快捷命令行、下一步建议提取、AI 解析开关、自定义命令管理与发送逻辑
 test/suggestion.test.mjs  下一步建议提取的单元测试（node:test，只求值 client.js 的纯函数段落）
+test/analyze.test.mjs     Host 分析接口的单元测试（node:test，假的 ctx 模拟模型流）
 locale/zh.json        插件展示元数据（中文）
 locale/en.json        插件展示元数据（英文）
 icon.svg              图标

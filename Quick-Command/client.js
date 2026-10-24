@@ -29,6 +29,12 @@
  * the word, such as "需要我发版的话说一声。", "发版" becomes the chip. A derived
  * chip that matches an existing command text exactly is dropped. It follows
  * each new answer and disappears when no action can be extracted.
+ *
+ * The local extractor is a heuristic. With the "AI 解析建议" switch on, the row
+ * asks the Host (`index.js`, same origin) to read the answer with the
+ * Deployment's default model; that reply replaces the local one, and any
+ * failure falls back to local rules. The switch is off by default and the
+ * answer text is only sent when the user turns it on.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-quick-commands',
@@ -44,6 +50,18 @@ window.__ModuleLoader__.load({
 
     /** Where the ids of deleted built-in commands are persisted. */
     const HIDDEN_KEY = 'dsh-quick-commands.hidden';
+
+    /** Whether the model-backed suggestion is enabled, persisted in the browser. */
+    const AI_KEY = 'dsh-quick-commands.ai';
+
+    /** Same-origin Host route that extracts the reply with a model. */
+    const AI_ROUTE = '/plugins/dsh-quick-commands/analyze';
+
+    /** Client-side budget for one analyze request, just above the Host's own. */
+    const AI_TIMEOUT_MS = 9000;
+
+    /** How many analyzed answers stay cached in memory. */
+    const AI_CACHE_LIMIT = 20;
 
     /** Longest accepted command text, in characters. */
     const MAX_LENGTH = 40;
@@ -83,6 +101,13 @@ window.__ModuleLoader__.load({
       'manage.moveUp': '上移',
       'manage.moveDown': '下移',
       'manage.invalid': '命令不能为空，也不能与已有命令重复',
+      'ai.label': 'AI 解析建议',
+      'ai.hint':
+        '开启后用 DSH 当前默认模型理解 Agent 的最后一条回答，提取更准确的回复；回答文本会发送给模型服务。',
+      'ai.on': '已开启',
+      'ai.off': '已关闭',
+      'ai.loading': 'AI 解析中…',
+      'ai.error': 'AI 解析失败，已回退到本地规则',
     };
     const en = {
       'group.label': 'Quick commands',
@@ -107,6 +132,13 @@ window.__ModuleLoader__.load({
       'manage.moveUp': 'Move up',
       'manage.moveDown': 'Move down',
       'manage.invalid': 'The command must be non-empty and not a duplicate',
+      'ai.label': 'AI suggestion',
+      'ai.hint':
+        'Use the deployment’s default model to read the agent’s last answer and extract a more accurate reply; the answer text is sent to the model service.',
+      'ai.on': 'On',
+      'ai.off': 'Off',
+      'ai.loading': 'AI parsing…',
+      'ai.error': 'AI parsing failed; falling back to local rules',
     };
 
     /** Chip styling, built only from host theme tokens. */
@@ -204,6 +236,23 @@ window.__ModuleLoader__.load({
       'color:var(--dsw-alias-label-secondary);',
       '}',
       '.dsh-quick-commands__panel-footer{display:flex;justify-content:flex-end;align-items:center;gap:6px;}',
+      '.dsh-quick-commands__ai{',
+      'display:flex;align-items:center;gap:6px;padding:4px;margin:0;cursor:pointer;',
+      'font:var(--dsw-font-xs-strong-13,500 13px/18px var(--dsw-font-family,sans-serif));',
+      'color:var(--dsw-alias-label-primary);',
+      '}',
+      '.dsh-quick-commands__ai input{accent-color:var(--dsw-alias-brand-primary);margin:0;}',
+      '.dsh-quick-commands__ai-state{margin-left:auto;color:var(--dsw-alias-label-secondary);}',
+      '.dsh-quick-commands__ai-hint{',
+      'padding:0 4px 4px;margin:0;',
+      'font:var(--dsw-font-xs-strong-13,500 13px/18px var(--dsw-font-family,sans-serif));',
+      'color:var(--dsw-alias-label-secondary);line-height:1.5;',
+      '}',
+      '.dsh-quick-commands__ai-error{',
+      'padding:0 4px 2px;margin:0;',
+      'font:var(--dsw-font-xs-strong-13,500 13px/18px var(--dsw-font-family,sans-serif));',
+      'color:var(--dsw-alias-label-secondary);',
+      '}',
     ].join('');
 
     /**
@@ -459,7 +508,14 @@ window.__ModuleLoader__.load({
       const match = text.match(
         /^(?:如果|要是|若)?\s*(?:(?:你|您)(?:需要|想|想要|要|希望)|(?:需要|要不要|需不需要|是否(?:需要|要)|可以|能))\s*(?:我|我们)?\s*(?:帮你|帮忙|帮|为|给|替)?\s*(.{1,20}?)\s*(?:吗|么|嘛|呢)?$/u,
       );
-      return match ? match[1].trim() : '';
+      if (!match) return '';
+      // "需要发版时告诉我" names the moment, not the action: keep 发版, not
+      // 发版时. A suffix that would leave a single character is not an action.
+      const value = match[1]
+        .trim()
+        .replace(/(?:的时候|时|之后|以后|后)$/u, '')
+        .trim();
+      return value.length < 2 ? '' : value;
     };
 
     /**
@@ -792,6 +848,57 @@ window.__ModuleLoader__.load({
     let visibleBuiltinCache = null;
     const listeners = new Set();
 
+    /**
+     * The model-backed switch and the in-memory cache of analyzed answers. The
+     * switch is persisted; the cache is not, so a restart re-asks once per answer.
+     */
+    let aiEnabledCache = null;
+    const analyzedAnswers = new Map();
+
+    /** @returns whether the stored AI switch is on. */
+    const readAiEnabled = () => {
+      try {
+        return window.localStorage.getItem(AI_KEY) === 'on';
+      } catch {
+        return false;
+      }
+    };
+
+    /** @returns the shared AI switch value. */
+    const getAiEnabled = () => {
+      if (aiEnabledCache === null) aiEnabledCache = readAiEnabled();
+      return aiEnabledCache;
+    };
+
+    /**
+     * Persist the AI switch and notify mounted rows so the suggestion refreshes.
+     *
+     * @param next - whether model-backed extraction is enabled.
+     */
+    const setAiEnabled = (next) => {
+      aiEnabledCache = next;
+      try {
+        window.localStorage.setItem(AI_KEY, next ? 'on' : 'off');
+      } catch {
+        // Private mode or a full quota: keep working for this session.
+      }
+      notify();
+    };
+
+    /**
+     * Remember one analyzed answer, keeping the cache bounded.
+     *
+     * @param answer - the assistant text that was analyzed.
+     * @param reply - the extracted reply, possibly empty.
+     */
+    const rememberAnalyzed = (answer, reply) => {
+      analyzedAnswers.set(answer, reply);
+      while (analyzedAnswers.size > AI_CACHE_LIMIT) {
+        const oldest = analyzedAnswers.keys().next().value;
+        analyzedAnswers.delete(oldest);
+      }
+    };
+
     /** @returns the shared custom-command list. */
     const getCustom = () => {
       if (cache === null) cache = readStored();
@@ -879,6 +986,11 @@ window.__ModuleLoader__.load({
 
     // Keep the row in sync when another tab edits or clears the same list.
     window.addEventListener('storage', (event) => {
+      if (event.key === AI_KEY) {
+        aiEnabledCache = readAiEnabled();
+        notify();
+        return;
+      }
       if (
         event.key !== STORAGE_KEY &&
         event.key !== HIDDEN_KEY &&
@@ -932,13 +1044,82 @@ window.__ModuleLoader__.load({
 
       const visible = canAccept && idle && !dismissed;
 
-      // The leading chip is derived, never stored: the latest answer's final
-      // question decides it, and it is hidden when it duplicates a command.
-      const suggestion = React.useMemo(() => {
-        if (!visible) return '';
-        const action = extractAction(lastAnswer);
-        return action && !isDuplicate(action) ? action : '';
-      }, [visible, lastAnswer, builtin, custom]);
+      const aiEnabled = React.useSyncExternalStore(
+        subscribe,
+        getAiEnabled,
+        getAiEnabled,
+      );
+      const [ai, setAi] = React.useState({
+        answer: '',
+        status: 'idle',
+        reply: '',
+      });
+
+      // The leading chip is derived, never stored. Local rules show instantly;
+      // the model's reply replaces them once it lands, and a disabled switch
+      // keeps the local path. Either way a duplicate command hides the chip.
+      const localSuggestion = React.useMemo(
+        () => (visible ? extractAction(lastAnswer) : ''),
+        [visible, lastAnswer],
+      );
+      const aiReady = ai.answer === lastAnswer && ai.status === 'done';
+      const candidate = aiEnabled && aiReady ? ai.reply : localSuggestion;
+      const suggestion = React.useMemo(
+        () => (candidate && !isDuplicate(candidate) ? candidate : ''),
+        [candidate, builtin, custom],
+      );
+
+      // Ask the Host's model once per answer; the answer text is the cache key.
+      React.useEffect(() => {
+        if (!visible || !aiEnabled || !lastAnswer) {
+          setAi({ answer: '', status: 'idle', reply: '' });
+          return undefined;
+        }
+        const cached = analyzedAnswers.get(lastAnswer);
+        if (cached !== undefined) {
+          setAi({ answer: lastAnswer, status: 'done', reply: cached });
+          return undefined;
+        }
+
+        const controller = new AbortController();
+        let cancelled = false;
+        const timer = window.setTimeout(
+          () => controller.abort(),
+          AI_TIMEOUT_MS,
+        );
+        setAi({ answer: lastAnswer, status: 'loading', reply: '' });
+
+        fetch(AI_ROUTE, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ text: lastAnswer }),
+          credentials: 'same-origin',
+          signal: controller.signal,
+        })
+          .then((response) =>
+            response.ok
+              ? response.json()
+              : Promise.reject(new Error(String(response.status))),
+          )
+          .then((data) => {
+            if (cancelled) return;
+            const reply =
+              data && typeof data.reply === 'string' ? data.reply : '';
+            rememberAnalyzed(lastAnswer, reply);
+            setAi({ answer: lastAnswer, status: 'done', reply });
+          })
+          .catch(() => {
+            if (cancelled) return;
+            setAi({ answer: lastAnswer, status: 'error', reply: '' });
+          })
+          .finally(() => window.clearTimeout(timer));
+
+        return () => {
+          cancelled = true;
+          controller.abort();
+          window.clearTimeout(timer);
+        };
+      }, [visible, aiEnabled, lastAnswer]);
 
       // Typing (or any programmatic draft) dismisses the row immediately.
       React.useEffect(() => {
@@ -1199,27 +1380,27 @@ window.__ModuleLoader__.load({
           );
         }
 
-        if (builtin.length + custom.length > 0) {
-          chips.push(
-            h(
-              'button',
-              {
-                key: 'manage',
-                type: 'button',
-                className:
-                  'dsh-quick-commands__chip dsh-quick-commands__chip--ghost',
-                title: t('manage.label'),
-                'aria-label': t('manage.label'),
-                onClick: (event) => {
-                  event.preventDefault();
-                  setManaging(true);
-                  setEditingId(null);
-                },
+        // Always available: the panel also holds the AI switch, which must be
+        // reachable after every command has been deleted.
+        chips.push(
+          h(
+            'button',
+            {
+              key: 'manage',
+              type: 'button',
+              className:
+                'dsh-quick-commands__chip dsh-quick-commands__chip--ghost',
+              title: t('manage.label'),
+              'aria-label': t('manage.label'),
+              onClick: (event) => {
+                event.preventDefault();
+                setManaging(true);
+                setEditingId(null);
               },
-              t('manage.label'),
-            ),
-          );
-        }
+            },
+            t('manage.label'),
+          ),
+        );
 
         return chips;
       };
@@ -1343,6 +1524,40 @@ window.__ModuleLoader__.load({
             role: 'group',
             'aria-label': t('manage.label'),
           },
+          h(
+            'label',
+            { className: 'dsh-quick-commands__ai', title: t('ai.hint') },
+            h('input', {
+              type: 'checkbox',
+              checked: aiEnabled,
+              onChange: (event) => setAiEnabled(event.target.checked),
+            }),
+            h('span', null, t('ai.label')),
+            h(
+              'span',
+              { className: 'dsh-quick-commands__ai-state' },
+              aiEnabled ? t('ai.on') : t('ai.off'),
+            ),
+          ),
+          h(
+            'span',
+            { className: 'dsh-quick-commands__ai-hint' },
+            t('ai.hint'),
+          ),
+          aiEnabled && ai.status === 'loading'
+            ? h(
+                'span',
+                { className: 'dsh-quick-commands__ai-error' },
+                t('ai.loading'),
+              )
+            : null,
+          aiEnabled && ai.status === 'error'
+            ? h(
+                'span',
+                { className: 'dsh-quick-commands__ai-error' },
+                t('ai.error'),
+              )
+            : null,
           builtin.length + custom.length === 0
             ? h(
                 'span',

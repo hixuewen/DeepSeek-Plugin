@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Quick Commands",
-    "description": "Shows one-click command chips above the composer whenever the session is idle and has had at least one turn; a brand-new session shows none until its first turn settles. Clicking a chip sends that prompt to the agent; typing dismisses them. A leading suggestion is extracted from the agent's latest answer — questions, one-word replies it asks for, and waiting statements such as 'let me know once you're logged in'. Built-in and custom commands can both be deleted, with custom ones added, edited and reordered."
+    "description": "Shows one-click command chips above the composer whenever the session is idle and has had at least one turn; a brand-new session shows none until its first turn settles. Clicking a chip sends that prompt to the agent; typing dismisses them. A leading suggestion is extracted from the agent's latest answer — questions, one-word replies it asks for, offers such as 'say the word and I will release', and waiting statements such as 'let me know once you're logged in'. An optional AI switch in Manage uses the deployment's default model to read the last answer (off by default). Built-in and custom commands can both be deleted, with custom ones added, edited and reordered."
   }
 }

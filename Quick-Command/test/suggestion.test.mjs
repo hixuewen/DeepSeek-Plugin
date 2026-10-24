@@ -117,6 +117,20 @@ test('extracts the action an offer waits on', () => {
   assert.equal(extractAction('需要我发版的话说一声'), '发版');
 });
 
+// A "when" clause describes the moment, not the action: "需要发版时告诉我"
+// should offer 发版, never 发版时.
+test('extracts the offered action from a when clause', () => {
+  assert.equal(
+    extractAction(
+      '没有打标签，也没有发版；需要发版时告诉我，我会按 `v1.3.0` 打标签并推送标签。',
+    ),
+    '发版',
+  );
+  assert.equal(extractAction('需要我发版时告诉我'), '发版');
+  assert.equal(extractAction('需要我发版的时候告诉我'), '发版');
+  assert.equal(extractAction('需要我发版后告诉我'), '发版');
+});
+
 test('does not turn a bare @ reference into a chip', () => {
   // "@Quick-Command/" names a folder; it is not a reply the user sends.
   assert.equal(extractAction('直接说 `@Quick-Command/` 即可'), '');
