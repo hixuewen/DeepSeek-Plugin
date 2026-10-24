@@ -103,3 +103,27 @@ test('does not turn a yes/no question after a colon into a chip', () => {
   assert.equal(extractAction('确认一下：写这个工具吗？'), '');
   assert.equal(extractAction('确认一句：继续呢？'), '');
 });
+
+// Offers: "需要我发版的话说一声" asks for a reply without naming it in quotes.
+test('extracts the action an offer waits on', () => {
+  assert.equal(
+    extractAction(
+      '还没打标签或推送（v1.3.0 + `git push origin main --tags`）。需要我发版的话说一声。',
+    ),
+    '发版',
+  );
+  assert.equal(extractAction('需要我继续修复的话告诉我'), '继续修复');
+  assert.equal(extractAction('需要我提交的话跟我说一声'), '提交');
+  assert.equal(extractAction('需要我发版的话说一声'), '发版');
+});
+
+test('does not turn a bare @ reference into a chip', () => {
+  // "@Quick-Command/" names a folder; it is not a reply the user sends.
+  assert.equal(extractAction('直接说 `@Quick-Command/` 即可'), '');
+  assert.equal(extractAction('直接回复 @Quick-Command/ 即可。'), '');
+  assert.equal(
+    extractAction('需要的话，直接发送 @Quick-Command/README.md'),
+    '',
+  );
+  assert.equal(extractAction('请回复「@Quick-Command/」继续'), '');
+});

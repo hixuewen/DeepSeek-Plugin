@@ -25,8 +25,10 @@
  * in front of every built-in and custom command. A plain statement also counts:
  * when the Agent waits for the user to finish a prerequisite and report back,
  * such as "登录完成后告诉我，我读取 C:\temp\frida 的结果。", the prerequisite
- * becomes a "登录完成" chip. It follows each new answer and disappears when no
- * action can be extracted.
+ * becomes a "登录完成" chip; when it offers to do the next step and waits for
+ * the word, such as "需要我发版的话说一声。", "发版" becomes the chip. A derived
+ * chip that matches an existing command text exactly is dropped. It follows
+ * each new answer and disappears when no action can be extracted.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-quick-commands',
@@ -312,6 +314,9 @@ window.__ModuleLoader__.load({
         .trim();
 
       if (!value || value.length > MAX_LENGTH) return '';
+      // An `@` reference names a file or folder, it is not itself a reply:
+      // never turn "@Quick-Command/" into a chip.
+      if (/^@/u.test(value)) return '';
       if (!/[0-9A-Za-z\u00C0-\u024F\u3400-\u9FFF\u3040-\u30FF\uAC00-\uD7AF]/u.test(value)) {
         return '';
       }
@@ -435,6 +440,29 @@ window.__ModuleLoader__.load({
     };
 
     /**
+     * Match "需要我 X / 要不要我 X" and capture X.
+     *
+     * This is the offer form of a waiting statement: the Agent proposes to do
+     * something and asks the user to say the word, as in
+     * "需要我发版的话说一声。" The captured action is already sendable, so it is
+     * not passed through `cleanWaitAction` (which would append 完成).
+     *
+     * @param clause - trimmed prerequisite clause.
+     * @returns the action phrase, or an empty string.
+     */
+    const matchOffer = (clause) => {
+      const text = String(clause ?? '')
+        .replace(/[\s，,。；;、]+$/u, '')
+        .replace(/(?:的话|的话就)+$/u, '')
+        .trim();
+      if (!text) return '';
+      const match = text.match(
+        /^(?:如果|要是|若)?\s*(?:(?:你|您)(?:需要|想|想要|要|希望)|(?:需要|要不要|需不需要|是否(?:需要|要)|可以|能))\s*(?:我|我们)?\s*(?:帮你|帮忙|帮|为|给|替)?\s*(.{1,20}?)\s*(?:吗|么|嘛|呢)?$/u,
+      );
+      return match ? match[1].trim() : '';
+    };
+
+    /**
      * Turn a captured prerequisite into a sendable command.
      *
      * @param raw - action phrase captured from the prerequisite clause.
@@ -482,6 +510,13 @@ window.__ModuleLoader__.load({
           PURE_DONE.test(before.replace(/^(?:如果|一旦|当)/u, '').trim())
         ) {
           best = '完成';
+          continue;
+        }
+        // "需要我发版的话说一声" is an offer: the captured phrase is the reply.
+        const offer = matchOffer(before);
+        if (offer) {
+          const cleaned = cleanAction(offer);
+          if (cleaned) best = cleaned;
           continue;
         }
         const action =
