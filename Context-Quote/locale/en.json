@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Context Quote",
-    "description": "Quote conversation text or previewed code into the composer, and right-click a file to add an @ reference."
+    "description": "Quote conversation text or previewed code into the composer, and right-click a file or folder to add an @ reference."
   }
 }

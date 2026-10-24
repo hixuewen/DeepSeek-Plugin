@@ -8,19 +8,21 @@
  *   publishes this Session's stable `inputActions` face. That slot is the only
  *   sanctioned seat that hands a plugin the composer's public action face.
  * - `shell.overlay` (root scope, the frame-wide floating layer) mounts the
- *   visible `引用` action (conversation selections) and the file context menu.
- * - `sidebar.right.tab.files.actions` (Session scope) listens for a file row's
- *   native `contextmenu`, suppresses the browser menu, and publishes the file
- *   menu request for the floating layer.
+ *   visible `引用` action (conversation selections) and the file/folder context
+ *   menu.
+ * - `sidebar.right.tab.files.actions` (Session scope) listens for a file or
+ *   folder row's native `contextmenu`, suppresses the browser menu, and
+ *   publishes the entry menu request for the floating layer.
  * - `sidebar.right.tab.document.actions` (Session scope) publishes the quoting
  *   face for one open preview (path plus insert callbacks), which the floating
  *   `引用` action uses while a code or plain-text selection is live.
  *
- * Inserts never overwrite the draft: an `@file` reference goes in as a real
- * composer chip through the Session input facade's `insertReference()`, and the
- * optional code fence follows through `insertText()`, both revision-guarded by
- * `captureInsertion()`. Keyboard focus then returns to the composer through
- * `SessionInput.focus()`, so the caret sits after the inserted block.
+ * Inserts never overwrite the draft: an `@file` / `@folder/` reference goes in
+ * as a real composer chip through the Session input facade's
+ * `insertReference()`, and the optional code fence follows through
+ * `insertText()`, both revision-guarded by `captureInsertion()`. Keyboard focus
+ * then returns to the composer through `SessionInput.focus()`, so the caret
+ * sits after the inserted block.
  */
 window.__ModuleLoader__.load({
   id: '@local/dsh-context-quote',
@@ -37,6 +39,8 @@ window.__ModuleLoader__.load({
       'action.quoteCodeHint': '将选中的代码引用到输入框',
       'menu.quoteFile': '引用',
       'menu.quoteFileHint': '将该文件引用到输入框',
+      'menu.quoteFolder': '引用',
+      'menu.quoteFolderHint': '将该目录引用到输入框',
     };
     const en = {
       'action.quote': 'Quote',
@@ -44,6 +48,8 @@ window.__ModuleLoader__.load({
       'action.quoteCodeHint': 'Quote the selected code into the composer',
       'menu.quoteFile': 'Quote',
       'menu.quoteFileHint': 'Quote this file into the composer',
+      'menu.quoteFolder': 'Quote',
+      'menu.quoteFolderHint': 'Quote this folder into the composer',
     };
 
     /** Floating action and context-menu chrome, built only from host theme tokens. */
@@ -90,8 +96,8 @@ window.__ModuleLoader__.load({
 
     /** Source name owned by the shipped `@file` reference source. */
     const REFERENCE_SOURCE = 'reference';
-    /** File rows published by the right Sidebar's workspace tree. */
-    const FILE_ROW = '[data-files-entry="file"]';
+    /** Entry rows published by the right Sidebar's workspace tree. */
+    const ENTRY_ROW = '[data-files-entry="file"], [data-files-entry="directory"]';
     /** Preview roots that publish their own file identity. */
     const PREVIEW_ROOT = '[data-textpreview-url]';
     /** Renderers whose selection reads as code rather than prose. */
@@ -148,6 +154,20 @@ window.__ModuleLoader__.load({
       // Same rejection as the shipped reference source: control characters and
       // embedded quotes cannot survive the `@path` / `@"path"` grammar.
       if (value === '' || /[\u0000-\u001f\u007f-\u009f"]/u.test(value)) return null;
+      return /\s/u.test(value) ? `@"${value}"` : `@${value}`;
+    }
+
+    /**
+     * Spell one directory as an atomic `@` mention. The shipped grammar marks a
+     * folder by a trailing `/` (that is also what makes the transcript render a
+     * folder chip), so the separator is added after trimming any the caller or
+     * the tree row already carries.
+     * @param path - relative or absolute directory path.
+     * @returns the mention, or null when the grammar cannot represent the path.
+     */
+    function formatFolderMention(path) {
+      const value = `${slashPath(path).replace(/[/\\]+$/, '')}/`;
+      if (value === '/' || /[\u0000-\u001f\u007f-\u009f"]/u.test(value)) return null;
       return /\s/u.test(value) ? `@"${value}"` : `@${value}`;
     }
 
@@ -331,23 +351,46 @@ window.__ModuleLoader__.load({
       }
 
       /**
-       * Quote one whole file as an `@file` chip.
+       * Quote one whole file or directory as an `@` chip. A directory keeps the
+       * trailing slash and the folder glyph the shipped picker uses, so the chip
+       * reads as a folder and the mention resolves to the folder itself.
        * @param path - relative or absolute mention path.
+       * @param kind - `file` or `folder`.
        * @returns whether the chip landed.
        */
-      function quoteFile(path) {
-        const mention = formatFileMention(path);
+      function quoteEntry(path, kind) {
+        const folder = kind === 'folder';
+        const mention = folder ? formatFolderMention(path) : formatFileMention(path);
         if (mention === null) return false;
+        const name = basenameOf(path);
         const reference = {
           source: REFERENCE_SOURCE,
           ref: mention,
-          label: basenameOf(path),
-          appearance: 'file',
+          label: folder ? `${name}/` : name,
+          appearance: folder ? 'folder' : 'file',
           clipboardText: mention,
         };
         const applied = insertChip(reference);
         if (applied) focusComposer(rootCtx, sessionId);
         return applied;
+      }
+
+      /**
+       * Quote one whole file as an `@file` chip.
+       * @param path - relative or absolute mention path.
+       * @returns whether the chip landed.
+       */
+      function quoteFile(path) {
+        return quoteEntry(path, 'file');
+      }
+
+      /**
+       * Quote one whole directory as an `@folder/` chip.
+       * @param path - relative or absolute mention path.
+       * @returns whether the chip landed.
+       */
+      function quoteFolder(path) {
+        return quoteEntry(path, 'folder');
       }
 
       /**
@@ -376,7 +419,7 @@ window.__ModuleLoader__.load({
         return chipped && textApplied;
       }
 
-      return { quoteFile, quoteSnippet };
+      return { quoteFile, quoteFolder, quoteSnippet };
     }
 
     /* ------------------------------------------------------------------ *
@@ -417,7 +460,7 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ *
-     * Preview faces and file menu requests
+     * Preview faces and entry menu requests
      *
      * Session-scoped anchors publish into these module stores; the root-scope
      * floating layer renders them. Neither store keeps React state of its own.
@@ -426,41 +469,41 @@ window.__ModuleLoader__.load({
     /** Live preview roots and the quoting face each one publishes. */
     const previewFaces = new WeakMap();
 
-    /** Open file context menu request, or null. */
-    let fileMenu = null;
-    /** Render callbacks waiting for a file-menu change. */
-    const fileMenuListeners = new Set();
+    /** Open file/folder context menu request, or null. */
+    let entryMenu = null;
+    /** Render callbacks waiting for an entry-menu change. */
+    const entryMenuListeners = new Set();
 
     /**
-     * Replace the published file-menu request and wake its reader.
+     * Replace the published entry-menu request and wake its reader.
      * @param next - the new request, or null when the menu is dismissed.
      */
-    function publishFileMenu(next) {
-      fileMenu = next;
-      for (const listener of Array.from(fileMenuListeners)) listener();
+    function publishEntryMenu(next) {
+      entryMenu = next;
+      for (const listener of Array.from(entryMenuListeners)) listener();
     }
 
     /**
      * Close the menu only when it belongs to one unmounting tree.
      * @param owner - the tree root element that published the menu.
      */
-    function closeFileMenuFor(owner) {
-      if (fileMenu !== null && fileMenu.owner === owner) publishFileMenu(null);
+    function closeEntryMenuFor(owner) {
+      if (entryMenu !== null && entryMenu.owner === owner) publishEntryMenu(null);
     }
 
     /**
-     * Subscribe a component to the published file-menu request.
+     * Subscribe a component to the published entry-menu request.
      * @returns the current request, or null while the menu is closed.
      */
-    function useFileMenu() {
+    function useEntryMenu() {
       const [, bump] = React.useReducer((count) => count + 1, 0);
       React.useEffect(() => {
-        fileMenuListeners.add(bump);
+        entryMenuListeners.add(bump);
         return () => {
-          fileMenuListeners.delete(bump);
+          entryMenuListeners.delete(bump);
         };
       }, []);
-      return fileMenu;
+      return entryMenu;
     }
 
     /**
@@ -688,14 +731,14 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The file context menu published by the workspace tree. One row quotes
-     * the file as an `@file` reference chip.
+     * The file/folder context menu published by the workspace tree. One row
+     * quotes the entry as an `@` reference chip.
      * @param props - locale seat (`t`) for the visible label.
-     * @returns the menu while a file row requested it; null otherwise.
+     * @returns the menu while an entry row requested it; null otherwise.
      */
-    function FileQuoteMenu(props) {
+    function EntryQuoteMenu(props) {
       const { t } = props;
-      const request = useFileMenu();
+      const request = useEntryMenu();
       const menuRef = React.useRef(null);
 
       React.useEffect(() => {
@@ -727,6 +770,10 @@ window.__ModuleLoader__.load({
 
       if (request === null) return null;
 
+      const folder = request.kind === 'folder';
+      const label = folder ? t('menu.quoteFolder') : t('menu.quoteFile');
+      const hint = folder ? t('menu.quoteFolderHint') : t('menu.quoteFileHint');
+
       const width = 300;
       const height = 40;
       const x = Math.min(Math.max(request.x, 8), Math.max(8, window.innerWidth - width - 8));
@@ -742,7 +789,7 @@ window.__ModuleLoader__.load({
             ref: menuRef,
             className: 'dsh-context-quote__menu',
             role: 'menu',
-            'aria-label': t('menu.quoteFile'),
+            'aria-label': label,
             style: {
               position: 'fixed',
               left: `${x}px`,
@@ -757,7 +804,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               role: 'menuitem',
               className: 'dsh-context-quote__menuItem',
-              title: t('menu.quoteFileHint'),
+              title: hint,
               autoFocus: true,
               onClick: () => {
                 try {
@@ -768,7 +815,7 @@ window.__ModuleLoader__.load({
               },
             },
             quoteGlyph(),
-            h('span', { className: 'dsh-context-quote__menuName' }, t('menu.quoteFile')),
+            h('span', { className: 'dsh-context-quote__menuName' }, label),
             h('span', { className: 'dsh-context-quote__menuPath' }, request.label),
           ),
         ),
@@ -813,7 +860,7 @@ window.__ModuleLoader__.load({
 
     /**
      * Build the invisible bridge mounted in a workspace tree's header. It owns
-     * that tree's `contextmenu` handling and publishes the file menu request.
+     * that tree's `contextmenu` handling and publishes the entry menu request.
      * @param rootCtx - the plugin's client root context.
      * @returns the tree anchor component.
      */
@@ -828,37 +875,47 @@ window.__ModuleLoader__.load({
           const root = node.closest('[data-files-root]');
           if (root === null) return undefined;
 
-          /** Turn one file-row right click into a floating menu request. */
+          /** Turn one entry-row right click into a floating menu request. */
           const onContextMenu = (event) => {
             const target = event.target;
             if (!(target instanceof Element)) return;
-            const row = target.closest(FILE_ROW);
+            const row = target.closest(ENTRY_ROW);
             if (row === null) return;
             const absolutePath = row.getAttribute('data-files-path');
             if (absolutePath === null || absolutePath === '') return;
+            // Directory rows are the only ones the tree marks as folders; every
+            // other quotable row is a file. Rows without a kind ("other") keep
+            // the native menu.
+            const entryKind = row.getAttribute('data-files-entry');
+            const folder = entryKind === 'directory';
+            if (!folder && entryKind !== 'file') return;
             event.preventDefault();
             event.stopPropagation();
             const treeRoot = root.getAttribute('data-files-root') ?? '';
             const mention = mentionPathOf(absolutePath, treeRoot) || slashPath(absolutePath);
+            const name = basenameOf(absolutePath);
             const rect = row.getBoundingClientRect();
             const x = event.clientX > 0 ? event.clientX + 2 : rect.left + 12;
             const y = event.clientY > 0 ? event.clientY + 2 : rect.top + rect.height;
-            publishFileMenu({
+            publishEntryMenu({
               owner: root,
               x,
               y,
-              label: basenameOf(absolutePath),
+              kind: folder ? 'folder' : 'file',
+              label: folder ? `${name}/` : name,
               quote: () => {
-                createInserter(rootCtx, sessionId, inputActions).quoteFile(mention);
+                const inserter = createInserter(rootCtx, sessionId, inputActions);
+                if (folder) inserter.quoteFolder(mention);
+                else inserter.quoteFile(mention);
               },
-              close: () => closeFileMenuFor(root),
+              close: () => closeEntryMenuFor(root),
             });
           };
 
           root.addEventListener('contextmenu', onContextMenu);
           return () => {
             root.removeEventListener('contextmenu', onContextMenu);
-            closeFileMenuFor(root);
+            closeEntryMenuFor(root);
           };
         }, [inputActions, sessionId]);
 
@@ -928,8 +985,8 @@ window.__ModuleLoader__.load({
         );
         ctx.slots.inject('shell.overlay', () =>
           ctx.slots.register(
-            { name: 'shell.overlay', id: 'context-quote-file-menu', order: 21, locale: NS },
-            FileQuoteMenu,
+            { name: 'shell.overlay', id: 'context-quote-entry-menu', order: 21, locale: NS },
+            EntryQuoteMenu,
           ),
         );
         ctx.slots.inject('conversation.input.overlay', () =>
