@@ -8,7 +8,7 @@
  * and pressed Enter.
  *
  * Visibility rules:
- * - only while the Session is open, idle and has already had a turn;
+ * - only while the Session is open and idle (including the blank home screen);
  * - hidden while the composer holds a draft, so typing dismisses the row;
  * - once dismissed by typing it stays hidden until the next task settles.
  *
@@ -20,8 +20,15 @@
  * The leading chip is not stored: it is derived from the Agent's latest answer.
  * When that answer ends by asking the user to reply with an exact action — for
  * example "直接说「继续修复编译」即可" — the action becomes a suggestion chip
- * in front of every built-in and custom command. It follows each new answer and
- * disappears when no action can be extracted.
+ * in front of every built-in and custom command. A plain statement also counts:
+ * when the Agent waits for the user to finish a prerequisite and report back,
+ * such as "登录完成后告诉我，我读取 C:\temp\frida 的结果。", the prerequisite
+ * becomes a "登录完成" chip. It follows each new answer and disappears when no
+ * action can be extracted.
+ *
+ * The row is not limited to a settled conversation: a blank Session sitting on
+ * the home screen is open and idle too, so the built-in and custom commands are
+ * available there from the first click.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-quick-commands',
@@ -60,7 +67,7 @@ window.__ModuleLoader__.load({
       'hint.confirm': '把「确认」发送给 Agent，确认当前操作',
       'hint.custom': '点击把这条自定义命令发送给 Agent',
       'hint.suggestion':
-        '从 Agent 最后一条回答的提问里提取的下一步动作，点击直接发送',
+        '从 Agent 最后一条回答里提取的下一步动作（提问或等待你完成的事项），点击直接发送',
       'add.label': '添加',
       'add.hint': '手动添加一条快捷命令',
       'add.placeholder': '输入命令文字',
@@ -84,7 +91,7 @@ window.__ModuleLoader__.load({
       'hint.confirm': 'Send “确认” to the agent to confirm the current step',
       'hint.custom': 'Send this custom command to the agent',
       'hint.suggestion':
-        'The next action extracted from the agent’s last question. Click to send it',
+        'The next action extracted from the agent’s last answer (a question or something it waits for you to finish). Click to send it',
       'add.label': 'Add',
       'add.hint': 'Add a custom quick command',
       'add.placeholder': 'Command text',
@@ -301,6 +308,203 @@ window.__ModuleLoader__.load({
       return value;
     };
 
+    /* --- waiting conditions: statements that ask the user to report back -- */
+
+    /** Words that mark the reported prerequisite as finished. */
+    const DONE_WORDS =
+      '(?:准备好|装好|配好|弄好|做好|装完|配完|弄完|做完|完成|成功|好了|好|就绪|结束|完毕|通过|搞定)';
+
+    /** Ways an Agent asks the user to report that a prerequisite is done. */
+    const TELL_TRIGGER =
+      /(?:告诉我|跟我说(?:一声|一下|一句)?|跟我说|和我说(?:一声|一下)?|通知我|回我(?:一声|一下)?|叫我(?:一声|一下)?|说一声|吱一声|告知我|喊我|发消息给我|给我发消息)/gu;
+
+    /** Leading social or temporal words stripped from a captured action. */
+    const WAIT_PREFIX =
+      /^(?:(?:你|您|我们|我|麻烦|请|先|再|都|全部|全都|已经|已|现在|直接|(?:需要|得|要|必须)在|需要|得|要|必须|然后|接着|等|待|等到)\s*)+/u;
+
+    /** One sentence that expects the user to finish a prerequisite first. */
+    const ENGLISH_WAIT =
+      /(?:let me know|tell me|notify me|ping me|message me)\s+(?:once|when|after|as soon as)\s+(.{1,60}?)(?:[.!?]|$)/iu;
+
+    /** A bare "when this is done" clause with no named action. */
+    const PURE_DONE =
+      /^(?:都|全部|全都|你|您|我们|我|请|麻烦)?\s*(?:完成|做完|搞定|弄完|结束|完毕|好了|好)(?:之后|以后|后|了)?$/u;
+
+    /**
+     * Keep the clause that directly precedes a "tell me" trigger.
+     *
+     * Trailing politeness such as "，请" is removed before the last comma is
+     * used as a cut point, so "如果登录成功了，请告诉我" keeps the condition.
+     *
+     * @param before - raw text ahead of the trigger.
+     * @returns the trimmed prerequisite clause, possibly empty.
+     */
+    const trimWaitBefore = (before) => {
+      let clause = String(before ?? '')
+        .replace(/[。;；、，,\s]+$/u, '')
+        .trim();
+      clause = clause
+        .replace(
+          /(?:[\s，,]*(?:再|就|然后|才|的话|吧|啦|哈|哦|啊|呢|请|麻烦|你|您|记得|随时|及时))+$/u,
+          '',
+        )
+        .trim();
+      if (!clause) return '';
+      const cut = Math.max(
+        clause.lastIndexOf('，'),
+        clause.lastIndexOf(','),
+        clause.lastIndexOf('：'),
+        clause.lastIndexOf(':'),
+        clause.lastIndexOf('；'),
+        clause.lastIndexOf(';'),
+      );
+      if (cut >= 0) {
+        const tail = clause.slice(cut + 1).trim();
+        if (tail) clause = tail;
+      }
+      return clause;
+    };
+
+    /**
+     * Match "X 装好 / X 配好 / X 弄好" and keep the whole verb phrase.
+     *
+     * Keeps the natural object-verb order of "依赖装好" instead of turning it
+     * into "依赖完成".
+     *
+     * @param clause - trimmed prerequisite clause.
+     * @returns the action phrase, or an empty string.
+     */
+    const matchVerbGood = (clause) => {
+      const match = clause.match(
+        /^(?:等|待|等到|如果|一旦|当|在)?\s*(?:你|您|麻烦|请)?\s*(.{1,16}?(?:装|配|弄|做|搞|修|改|搭|接|开|关|启|停)(?:好|好了))\s*(?:之后|以后|后|的话)?$/u,
+      );
+      return match ? match[1] : '';
+    };
+
+    /**
+     * Match "X 完成 / X 好了 / X 成功" and capture X.
+     *
+     * @param clause - trimmed prerequisite clause.
+     * @returns the action phrase, or an empty string.
+     */
+    const matchDoneTail = (clause) => {
+      const match = clause.match(
+        new RegExp(
+          `^(?:等|待|等到|如果|一旦|当|在)?\\s*(?:你|您|麻烦|请|先|再|我们|我)?\\s*(.{1,16}?)\\s*${DONE_WORDS}\\s*了?\\s*(?:之后|以后|后|的话)?$`,
+          'u',
+        ),
+      );
+      return match ? match[1] : '';
+    };
+
+    /**
+     * Match "完成 X 后 / 做完 X 后" and capture X.
+     *
+     * @param clause - trimmed prerequisite clause.
+     * @returns the action phrase, or an empty string.
+     */
+    const matchFinishedVerb = (clause) => {
+      const match = clause.match(
+        /^(?:等|待|等到|如果|一旦|当|在)?\s*(?:你|您|麻烦|请)?\s*(?:先|再)?\s*(?:完成|做完|搞定)\s*(.{1,16}?)\s*(?:之后|以后|后|的话|了)?$/u,
+      );
+      return match ? match[1] : '';
+    };
+
+    /**
+     * Match a bare "X 后 / X 之后" prerequisite and capture X.
+     *
+     * @param clause - trimmed prerequisite clause.
+     * @returns the action phrase, or an empty string.
+     */
+    const matchAfter = (clause) => {
+      const match = clause.match(
+        /^(?:等|待|等到|在|如果|一旦|当)?\s*(?:你|您|麻烦|请)?\s*(.{1,16}?)\s*(?:之后|以后|后)$/u,
+      );
+      return match ? match[1] : '';
+    };
+
+    /**
+     * Turn a captured prerequisite into a sendable command.
+     *
+     * @param raw - action phrase captured from the prerequisite clause.
+     * @returns the cleaned command, or an empty string.
+     */
+    const cleanWaitAction = (raw) => {
+      let value = cleanAction(raw);
+      if (!value) return '';
+      value = value.replace(WAIT_PREFIX, '').trim();
+      value = value.replace(/(?:之后|以后|后|的话|了)$/u, '').trim();
+      if (!value) return '';
+      // "装好依赖" already states completion; everything else gets 完成.
+      if (
+        /(?:准备好|装好|配好|弄好|做好|装完|配完|弄完|做完|完成|成功|好了|好|就绪|结束|搞定)/u.test(
+          value,
+        )
+      ) {
+        return value;
+      }
+      const command = `${value}完成`;
+      return command.length > MAX_LENGTH ? '' : command;
+    };
+
+    /**
+     * Extract a "report back when done" action from one sentence.
+     *
+     * @param sentence - trimmed sentence to inspect.
+     * @returns the command, or an empty string when no waiting ask is found.
+     */
+    const waitActionOfSentence = (sentence) => {
+      const text = String(sentence ?? '').trim();
+      if (!text) return '';
+
+      const english = text.match(ENGLISH_WAIT);
+      if (english && /log(?:ged)?\s*in|sign(?:ed)?\s*in|login/i.test(english[1])) {
+        return 'Logged in';
+      }
+
+      let best = '';
+      for (const trigger of text.matchAll(TELL_TRIGGER)) {
+        const before = trimWaitBefore(text.slice(0, trigger.index));
+        if (!before) continue;
+        if (
+          PURE_DONE.test(before) ||
+          PURE_DONE.test(before.replace(/^(?:如果|一旦|当)/u, '').trim())
+        ) {
+          best = '完成';
+          continue;
+        }
+        const action =
+          matchVerbGood(before) ||
+          matchDoneTail(before) ||
+          matchFinishedVerb(before) ||
+          matchAfter(before);
+        if (!action) continue;
+        const cleaned = cleanWaitAction(action);
+        if (cleaned) best = cleaned;
+      }
+      return best;
+    };
+
+    /**
+     * Extract a waiting condition from an Agent answer, scanning from the end.
+     *
+     * Statement forms such as "登录完成后告诉我，我读取 C:\temp\frida 的结果。"
+     * carry no question mark but still imply the next user action.
+     *
+     * @param text - the latest assistant prose.
+     * @returns the command, or an empty string when none is found.
+     */
+    const extractWaitingAction = (text) => {
+      const source = String(text ?? '');
+      if (!source) return '';
+      const sentences = source.match(/[^。！？!?；;\n]+[。！？!?；;]?/gu) || [];
+      for (let index = sentences.length - 1; index >= 0; index -= 1) {
+        const action = waitActionOfSentence(sentences[index]);
+        if (action) return action;
+      }
+      return '';
+    };
+
     /**
      * Extract an action from one sentence: an explicitly quoted reply first,
      * then a colon-introduced reply, then a short Chinese or English question.
@@ -375,7 +579,8 @@ window.__ModuleLoader__.load({
     };
 
     /**
-     * Extract the action requested by the final question in an Agent answer.
+     * Extract the action requested by the final ask in an Agent answer: a
+     * quoted reply, a question, or a "report back when this is done" statement.
      * Sentences are scanned from the end so the last ask wins.
      *
      * @param text - the latest assistant prose.
@@ -394,7 +599,9 @@ window.__ModuleLoader__.load({
         const action = extractFromSentence(sentence, isQuestion(sentence));
         if (action) return action;
       }
-      return '';
+      // No quoted reply or question: fall back to a statement that asks the
+      // user to finish a prerequisite and report back.
+      return extractWaitingAction(source);
     };
 
     /**
@@ -629,8 +836,10 @@ window.__ModuleLoader__.load({
         (state) => state.phase === 'plain' && state.draft.trim() === '',
       );
       const running = props.useSession((state) => state.running);
+      // A blank Session on the home screen is open and idle as well, so the
+      // row is available there before the first turn.
       const idle = props.useSession(
-        (state) => state.openState === 'open' && !state.running && !state.blank,
+        (state) => state.openState === 'open' && !state.running,
       );
       const custom = React.useSyncExternalStore(subscribe, getCustom, getCustom);
       const builtin = React.useSyncExternalStore(
