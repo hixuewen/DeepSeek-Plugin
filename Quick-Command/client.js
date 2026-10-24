@@ -8,7 +8,8 @@
  * and pressed Enter.
  *
  * Visibility rules:
- * - only while the Session is open and idle (including the blank home screen);
+ * - only while the Session is open, idle and past its first turn: a brand-new
+ *   Session has no conversation context yet, so the row stays hidden there;
  * - hidden while the composer holds a draft, so typing dismisses the row;
  * - once dismissed by typing it stays hidden until the next task settles.
  *
@@ -19,16 +20,13 @@
  *
  * The leading chip is not stored: it is derived from the Agent's latest answer.
  * When that answer ends by asking the user to reply with an exact action — for
- * example "直接说「继续修复编译」即可" — the action becomes a suggestion chip
+ * example "直接说「继续修复编译」即可" or a one-word confirmation such as
+ * "你只需要确认一句：「写这个工具」" — the action becomes a suggestion chip
  * in front of every built-in and custom command. A plain statement also counts:
  * when the Agent waits for the user to finish a prerequisite and report back,
  * such as "登录完成后告诉我，我读取 C:\temp\frida 的结果。", the prerequisite
  * becomes a "登录完成" chip. It follows each new answer and disappears when no
  * action can be extracted.
- *
- * The row is not limited to a settled conversation: a blank Session sitting on
- * the home screen is open and idle too, so the built-in and custom commands are
- * available there from the first click.
  */
 window.__ModuleLoader__.load({
   id: 'dsh-quick-commands',
@@ -67,7 +65,7 @@ window.__ModuleLoader__.load({
       'hint.confirm': '把「确认」发送给 Agent，确认当前操作',
       'hint.custom': '点击把这条自定义命令发送给 Agent',
       'hint.suggestion':
-        '从 Agent 最后一条回答里提取的下一步动作（提问或等待你完成的事项），点击直接发送',
+        '从 Agent 最后一条回答里提取的下一步动作（它让你回复的短句、提问或等待你完成的事项），点击直接发送',
       'add.label': '添加',
       'add.hint': '手动添加一条快捷命令',
       'add.placeholder': '输入命令文字',
@@ -91,7 +89,7 @@ window.__ModuleLoader__.load({
       'hint.confirm': 'Send “确认” to the agent to confirm the current step',
       'hint.custom': 'Send this custom command to the agent',
       'hint.suggestion':
-        'The next action extracted from the agent’s last answer (a question or something it waits for you to finish). Click to send it',
+        'The next action extracted from the agent’s last answer (a short reply it asks for, a question, or something it waits for you to finish). Click to send it',
       'add.label': 'Add',
       'add.hint': 'Add a custom quick command',
       'add.placeholder': 'Command text',
@@ -240,13 +238,26 @@ window.__ModuleLoader__.load({
       ['**', '**'],
     ];
 
-    /** A directive that introduces the exact reply the user should send. */
+    /**
+     * A directive that introduces the exact reply the user should send.
+     *
+     * Covers both "说 / 回复 / 确认" with the reply in quotes and the colon form
+     * "确认一句：" followed by the reply in plain text; "一句话" and "一下" are
+     * treated as the same softener, and punctuation may follow it.
+     */
     const DIRECTIVE_BEFORE =
-      /(?:^|[，,：:；;]\s*)(?:(?:直接|只需|只需要|只要|请|就|可以|再|然后|接着|麻烦|你|您)\s*)*(?:说|回复|回答|输入|发送|告诉我|跟我说|叫我|say|reply|answer|type|send|confirm|respond)(?:\s*(?:我|with|me|that|the word))?\s*(?:[：:，,]\s*)?(?:一?句|一下)?\s*$/i;
+      /(?:^|[，,：:；;]\s*)(?:(?:直接|只需|只需要|只要|请|就|可以|再|然后|接着|麻烦|你|您|我(?:们)?\s*(?:只需要|只需|需要|只要))\s*)*(?:说|回复|回答|答复|回|确认|输入|发送|告诉我|跟我说|叫我|say|reply|answer|type|send|confirm|respond)(?:\s*(?:我|with|me|that|the word))?\s*(?:[：:，,]\s*)?(?:一?句(?:话)?|一下)?\s*(?:[：:，,]\s*)?$/i;
 
     /** Text after a quoted action that marks it as the reply the Agent wants. */
     const CONFIRM_AFTER =
       /^\s*(?:即可|就行|就可以|就可以了|便可|即开始|就开始|然后继续|then)/i;
+
+    /** Longest unquoted reply accepted after a directive colon, in characters. */
+    const COLON_TAIL_LENGTH = 24;
+
+    /** An unquoted reply that is really an open question, not an action. */
+    const OPEN_QUESTION =
+      /(?:是否|是不是|要不要|能不能|可不可以|怎么样|如何|好不好|吗|呢)/u;
 
     /** A question frame that introduces a quoted choice. */
     const ASK_BEFORE =
@@ -529,6 +540,29 @@ window.__ModuleLoader__.load({
         best = action;
       }
       if (best) return best;
+
+      // A directive may also end at a colon and spell the reply out unquoted,
+      // as in "你只需要确认一句：写这个工具" or "...：写这个工具，我就开始实现".
+      const colon = Math.max(
+        sentence.lastIndexOf('：'),
+        sentence.lastIndexOf(':'),
+      );
+      if (colon > 0) {
+        const head = sentence.slice(0, colon + 1);
+        const tail = sentence
+          .slice(colon + 1)
+          .split(/[，,。；;！!？?\n]/u)[0]
+          .trim();
+        if (
+          tail &&
+          tail.length <= COLON_TAIL_LENGTH &&
+          !OPEN_QUESTION.test(tail) &&
+          DIRECTIVE_BEFORE.test(head)
+        ) {
+          const action = cleanAction(tail);
+          if (action) return action;
+        }
+      }
 
       const bare = sentence
         .trim()
@@ -836,10 +870,12 @@ window.__ModuleLoader__.load({
         (state) => state.phase === 'plain' && state.draft.trim() === '',
       );
       const running = props.useSession((state) => state.running);
-      // A blank Session on the home screen is open and idle as well, so the
-      // row is available there before the first turn.
+      // A brand-new Session has no conversation context yet: a one-word reply
+      // has nothing to act on, so the row waits for the idle state that follows
+      // a first turn. `blank` is the host's New Session marker.
       const idle = props.useSession(
-        (state) => state.openState === 'open' && !state.running,
+        (state) =>
+          state.openState === 'open' && !state.running && !state.blank,
       );
       const custom = React.useSyncExternalStore(subscribe, getCustom, getCustom);
       const builtin = React.useSyncExternalStore(
