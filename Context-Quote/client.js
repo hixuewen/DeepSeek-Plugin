@@ -17,6 +17,11 @@
  *   face for one open preview (path plus insert callbacks), which the floating
  *   `引用` action uses while a code or plain-text selection is live.
  *
+ * Conversation selections become the host's native quote node through the
+ * public `insertQuote()` action, so the composer shows the same quote preview
+ * as the built-in Quote action and submission serializes it as a Markdown
+ * blockquote — no hand-built `>` text enters the draft.
+ *
  * Inserts never overwrite the draft: an `@file` / `@folder/` reference goes in
  * as a real composer chip through the Session input facade's
  * `insertReference()`, and the optional code fence follows through
@@ -218,36 +223,17 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Drop blank edge lines while preserving the code's own indentation.
+     * Normalize a browser selection into the body a quote carries: plain line
+     * endings, no blank edge lines, original indentation preserved. The
+     * conversation quote node and the quoted code fence both use it.
      * @param raw - the browser selection text.
-     * @returns the exact code body to quote.
+     * @returns the trimmed body.
      */
-    function selectedCode(raw) {
+    function quoteTextOf(raw) {
       const lines = String(raw).replace(/\r\n?/g, '\n').split('\n');
       while (lines.length > 0 && lines[0].trim() === '') lines.shift();
       while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
       return lines.join('\n');
-    }
-
-    /**
-     * Normalize one conversation selection into the Markdown quote block that
-     * enters the composer.
-     * @param raw - the browser selection text.
-     * @param hasDraft - whether the composer already holds content.
-     * @returns the block to insert, divider first when the draft is not empty.
-     */
-    function buildQuote(raw, hasDraft) {
-      const lines = String(raw).replace(/\r\n?/g, '\n').split('\n');
-      while (lines.length > 0 && lines[0].trim() === '') lines.shift();
-      while (lines.length > 0 && lines[lines.length - 1].trim() === '') lines.pop();
-      const body = lines
-        .map((line) => {
-          const trimmed = line.replace(/\s+$/, '');
-          return trimmed === '' ? '>' : `> ${trimmed}`;
-        })
-        .join('\n');
-      const separator = hasDraft ? '\n\n---\n\n' : '';
-      return `${separator}${body}\n\n`;
     }
 
     /* ------------------------------------------------------------------ *
@@ -402,7 +388,7 @@ window.__ModuleLoader__.load({
        * @returns whether the whole quote reached the draft.
        */
       function quoteSnippet(path, raw) {
-        const code = selectedCode(raw);
+        const code = quoteTextOf(raw);
         const mention = formatFileMention(path);
         if (code === '' || mention === null) return false;
         const reference = {
@@ -426,8 +412,9 @@ window.__ModuleLoader__.load({
      * Session bridge store (conversation selections)
      *
      * The floating action lives in a root-scope slot, which receives no
-     * composer action face. The Session-scope bridge publishes one, and the
-     * action reads it lazily so the draft never re-renders the floating UI.
+     * composer action face. A Session-scope bridge republishes this Session's
+     * `insertQuote()` action, and the floating action resolves it only when a
+     * selection is actually quoted.
      * ------------------------------------------------------------------ */
 
     /** Latest published bridge, or null while no Session composer is mounted. */
@@ -559,7 +546,8 @@ window.__ModuleLoader__.load({
     /**
      * The floating `引用` action: appears beside a non-empty selection inside
      * the conversation transcript or inside a code/plain-text preview and
-     * writes that selection into the composer draft.
+     * writes that selection into the composer — as a native quote node for
+     * transcript text, as a reference chip plus code fence for previewed code.
      * @param props - locale seat (`t`) for the visible label.
      * @returns the action while a quotable selection exists; null otherwise.
      */
@@ -702,17 +690,17 @@ window.__ModuleLoader__.load({
               },
               onClick: (event) => {
                 event.preventDefault();
-                // Drop the highlight before focusing, so the composer restores
-                // its own caret last and it stays visible.
-                const selection = window.getSelection();
-                if (selection !== null) selection.removeAllRanges();
+                // Drop the transcript highlight before the write, so the
+                // composer restores its own caret last and it stays visible.
+                window.getSelection()?.removeAllRanges();
                 try {
                   if (hit.kind === 'snippet') {
                     hit.face.quote(hit.text);
                   } else if (current !== null) {
-                    const draft = current.readDraft() ?? '';
-                    current.insert(buildQuote(hit.text, draft.trim() !== ''));
-                    current.focusComposer();
+                    // The native quote node renders the shared quote preview and
+                    // focuses the composer itself; submission then serializes the
+                    // blockquote, so no hand-built `>` text enters the draft.
+                    current.insertQuote(quoteTextOf(hit.text));
                   }
                 } catch {
                   // The composer may have been disposed between paint and click;
@@ -823,37 +811,24 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Build the invisible Session-scope bridge for one plugin instance:
-     * republishes the composer action face for the current Session and exposes
-     * the live draft without re-rendering.
-     * @param rootCtx - the plugin's client root context.
+     * Build the invisible Session-scope bridge for one plugin instance: it
+     * republishes the composer's public quote action for the root-scope
+     * floating `引用` action.
      * @returns the bridge component.
      */
-    function createQuoteBridge(rootCtx) {
+    function createQuoteBridge() {
       return function QuoteBridge(props) {
-        const { inputActions, sessionId, useInput } = props;
-        const draft = useInput((state) => state.draft);
-        const draftRef = React.useRef(draft);
-        draftRef.current = draft;
+        const { inputActions } = props;
         React.useEffect(() => {
           publishBridge({
-            sessionId,
-            readDraft: () => draftRef.current,
-            focusComposer: () => focusComposer(rootCtx, sessionId),
-            insert(block) {
-              // `insertText` is revision-guarded: a draft edit between capture and
-              // insert refuses the write, so recapture a few times before giving up.
-              for (let attempt = 0; attempt < 3; attempt += 1) {
-                const span = inputActions.captureInsertion();
-                if (inputActions.insertText(block, span)) return true;
-              }
-              return false;
-            },
+            // The shell owns phase, blank-text, and focus handling: a locked
+            // composer refuses the insert and leaves the draft untouched.
+            insertQuote: (text) => inputActions.insertQuote(text),
           });
           return () => {
             publishBridge(null);
           };
-        }, [inputActions, sessionId]);
+        }, [inputActions]);
         return null;
       };
     }
@@ -992,7 +967,7 @@ window.__ModuleLoader__.load({
         ctx.slots.inject('conversation.input.overlay', () =>
           ctx.slots.register(
             { name: 'conversation.input.overlay', id: 'context-quote-bridge', order: 90 },
-            createQuoteBridge(ctx),
+            createQuoteBridge(),
           ),
         );
         ctx.slots.inject('sidebar.right.tab.files.actions', () =>
