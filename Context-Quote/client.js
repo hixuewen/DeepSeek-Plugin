@@ -2,20 +2,24 @@
  * Context Quote — quote conversation text, workspace files, and previewed code
  * into the composer.
  *
- * Four slot contributions cooperate:
+ * Three slot contributions and one Service registration cooperate:
  *
  * - `conversation.input.overlay` (Session scope) mounts an invisible bridge that
  *   publishes this Session's stable `inputActions` face. That slot is the only
  *   sanctioned seat that hands a plugin the composer's public action face.
  * - `shell.overlay` (root scope, the frame-wide floating layer) mounts the
- *   visible `引用` action (conversation selections) and the file/folder context
- *   menu.
- * - `sidebar.right.tab.files.actions` (Session scope) listens for a file or
- *   folder row's native `contextmenu`, suppresses the browser menu, and
- *   publishes the entry menu request for the floating layer.
+ *   visible `引用` action for conversation selections.
  * - `sidebar.right.tab.document.actions` (Session scope) publishes the quoting
  *   face for one open preview (path plus insert callbacks), which the floating
  *   `引用` action uses while a code or plain-text selection is live.
+ * - `contextMenus` contributions add `引用` to the host's shared menu for every
+ *   captured `file` and `directory` target, so a right click on a workspace tree
+ *   row, the `files` page directory bar, or a preview path bar quotes the entry.
+ *
+ * The host owns the file menu itself; the plugin only contributes one row, so
+ * the tree keeps its native open/copy/download items and its own dismissal and
+ * keyboard behavior. The row writes the entry as an `@` reference chip through
+ * the Session face published by the composer bridge.
  *
  * Conversation selections become the host's native quote node through the
  * public `insertQuote()` action, so the composer shows the same quote preview
@@ -42,19 +46,13 @@ window.__ModuleLoader__.load({
       'action.quote': '引用',
       'action.quoteHint': '将选中的内容引用到输入框',
       'action.quoteCodeHint': '将选中的代码引用到输入框',
-      'menu.quoteFile': '引用',
-      'menu.quoteFileHint': '将该文件引用到输入框',
-      'menu.quoteFolder': '引用',
-      'menu.quoteFolderHint': '将该目录引用到输入框',
+      'menu.quote': '引用',
     };
     const en = {
       'action.quote': 'Quote',
       'action.quoteHint': 'Quote the selected text into the composer',
       'action.quoteCodeHint': 'Quote the selected code into the composer',
-      'menu.quoteFile': 'Quote',
-      'menu.quoteFileHint': 'Quote this file into the composer',
-      'menu.quoteFolder': 'Quote',
-      'menu.quoteFolderHint': 'Quote this folder into the composer',
+      'menu.quote': 'Quote',
     };
 
     /** Floating action and context-menu chrome, built only from host theme tokens. */
@@ -75,34 +73,12 @@ window.__ModuleLoader__.load({
       'outline:2px solid var(--dsw-alias-brand-primary);outline-offset:1px;',
       '}',
       '.dsh-context-quote__icon{display:inline-flex;flex:none;}',
-      '.dsh-context-quote__menu{',
-      'box-sizing:border-box;min-width:168px;max-width:300px;padding:4px;',
-      'background:var(--dsw-alias-bg-overlay);',
-      'border:1px solid var(--dsw-alias-border-l2);',
-      'border-radius:var(--dsw-radius-md,8px);',
-      'box-shadow:var(--dsw-elevation-panel,0 8px 24px rgba(0,0,0,.18));',
-      '}',
-      '.dsh-context-quote__menuItem{',
-      'display:flex;align-items:center;gap:8px;width:100%;box-sizing:border-box;',
-      'height:30px;padding:0 10px;',
-      'font:var(--dsw-font-xs-strong-13,500 13px/18px var(--dsw-font-family,sans-serif));',
-      'color:var(--dsw-alias-label-primary);background:transparent;border:0;',
-      'border-radius:var(--dsw-radius-sm,6px);cursor:pointer;text-align:left;',
-      '}',
-      '.dsh-context-quote__menuItem:hover,.dsh-context-quote__menuItem:focus-visible{',
-      'background:var(--dsw-alias-bg-layer-2);outline:none;',
-      '}',
-      '.dsh-context-quote__menuName{flex:none;}',
-      '.dsh-context-quote__menuPath{',
-      'flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;',
-      'color:var(--dsw-alias-label-secondary);font-weight:400;font-size:12px;',
-      '}',
     ].join('');
 
     /** Source name owned by the shipped `@file` reference source. */
     const REFERENCE_SOURCE = 'reference';
-    /** Entry rows published by the right Sidebar's workspace tree. */
-    const ENTRY_ROW = '[data-files-entry="file"], [data-files-entry="directory"]';
+    /** Key this plugin owns in the shared menu: its icon and its action id. */
+    const MENU_KEY = 'context-quote.quote';
     /** Preview roots that publish their own file identity. */
     const PREVIEW_ROOT = '[data-textpreview-url]';
     /** Renderers whose selection reads as code rather than prose. */
@@ -409,26 +385,54 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ *
-     * Session bridge store (conversation selections)
+     * Session input faces
      *
-     * The floating action lives in a root-scope slot, which receives no
-     * composer action face. A Session-scope bridge republishes this Session's
-     * `insertQuote()` action, and the floating action resolves it only when a
-     * selection is actually quoted.
+     * The floating action and the context-menu rows live outside the Session
+     * slots, so they receive no composer action face. A Session-scope bridge
+     * publishes this Session's `inputActions` face: the floating action quotes
+     * transcript selections through it, and the root-scope menu resolves the
+     * captured target's Session face from it.
      * ------------------------------------------------------------------ */
 
     /** Latest published bridge, or null while no Session composer is mounted. */
     let bridge = null;
+    /** Published faces by Session id, for menu rows addressing another Session. */
+    const sessionFaces = new Map();
     /** Render callbacks waiting for a bridge change. */
     const bridgeListeners = new Set();
 
-    /**
-     * Replace the published bridge and wake its readers.
-     * @param next - the new bridge face, or null when the composer unmounts.
-     */
-    function publishBridge(next) {
-      bridge = next;
+    /** Wake every bridge reader after a publish or withdraw. */
+    function wakeBridge() {
       for (const listener of Array.from(bridgeListeners)) listener();
+    }
+
+    /**
+     * Publish one Session composer's face as the current bridge.
+     * @param face - Session id, public insert actions, and the quote action.
+     */
+    function publishBridge(face) {
+      bridge = face;
+      sessionFaces.set(face.sessionId, face);
+      wakeBridge();
+    }
+
+    /**
+     * Withdraw one composer's face without disturbing a newer bridge.
+     * @param face - the exact face the unmounting composer published.
+     */
+    function withdrawBridge(face) {
+      if (bridge === face) bridge = null;
+      if (sessionFaces.get(face.sessionId) === face) sessionFaces.delete(face.sessionId);
+      wakeBridge();
+    }
+
+    /**
+     * Resolve one Session's published composer face.
+     * @param sessionId - Session whose composer published a face.
+     * @returns the face, or undefined while that composer is unmounted.
+     */
+    function faceOf(sessionId) {
+      return sessionFaces.get(sessionId);
     }
 
     /**
@@ -447,51 +451,15 @@ window.__ModuleLoader__.load({
     }
 
     /* ------------------------------------------------------------------ *
-     * Preview faces and entry menu requests
+     * Preview faces
      *
-     * Session-scoped anchors publish into these module stores; the root-scope
-     * floating layer renders them. Neither store keeps React state of its own.
+     * The Session-scoped preview anchor publishes each live preview's quoting
+     * face here; the root-scope floating action reads it. The store keeps no
+     * React state of its own.
      * ------------------------------------------------------------------ */
 
     /** Live preview roots and the quoting face each one publishes. */
     const previewFaces = new WeakMap();
-
-    /** Open file/folder context menu request, or null. */
-    let entryMenu = null;
-    /** Render callbacks waiting for an entry-menu change. */
-    const entryMenuListeners = new Set();
-
-    /**
-     * Replace the published entry-menu request and wake its reader.
-     * @param next - the new request, or null when the menu is dismissed.
-     */
-    function publishEntryMenu(next) {
-      entryMenu = next;
-      for (const listener of Array.from(entryMenuListeners)) listener();
-    }
-
-    /**
-     * Close the menu only when it belongs to one unmounting tree.
-     * @param owner - the tree root element that published the menu.
-     */
-    function closeEntryMenuFor(owner) {
-      if (entryMenu !== null && entryMenu.owner === owner) publishEntryMenu(null);
-    }
-
-    /**
-     * Subscribe a component to the published entry-menu request.
-     * @returns the current request, or null while the menu is closed.
-     */
-    function useEntryMenu() {
-      const [, bump] = React.useReducer((count) => count + 1, 0);
-      React.useEffect(() => {
-        entryMenuListeners.add(bump);
-        return () => {
-          entryMenuListeners.delete(bump);
-        };
-      }, []);
-      return entryMenu;
-    }
 
     /**
      * Resolve the floating anchor for one selection: the end of its last line,
@@ -513,33 +481,44 @@ window.__ModuleLoader__.load({
       return { x, y: above ? rect.top - 8 : rect.bottom + 8, below: !above };
     }
 
-    /** The quote glyph shared by the floating action and the file menu. */
+    /**
+     * The quote glyph, shared by the floating action and the context-menu icon.
+     * @param props - optional `size` in pixels; the menu icon uses the default.
+     * @returns the SVG glyph.
+     */
+    function QuoteIcon(props) {
+      const size = props?.size ?? 16;
+      return h(
+        'svg',
+        {
+          width: size,
+          height: size,
+          viewBox: '0 0 16 16',
+          fill: 'none',
+          xmlns: 'http://www.w3.org/2000/svg',
+          'aria-hidden': true,
+        },
+        h('path', {
+          d: 'M3 2.5v11',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+        }),
+        h('path', {
+          d: 'M7.3 5.6h5.7M7.3 10.4h5.7',
+          stroke: 'currentColor',
+          strokeWidth: 1.6,
+          strokeLinecap: 'round',
+        }),
+      );
+    }
+
+    /** The quote glyph inside the floating action button. */
     function quoteGlyph() {
       return h(
         'span',
         { className: 'dsh-context-quote__icon', 'aria-hidden': true },
-        h(
-          'svg',
-          {
-            width: 14,
-            height: 14,
-            viewBox: '0 0 14 14',
-            fill: 'none',
-            xmlns: 'http://www.w3.org/2000/svg',
-          },
-          h('path', {
-            d: 'M2.6 2.2v9.6',
-            stroke: 'currentColor',
-            strokeWidth: 1.6,
-            strokeLinecap: 'round',
-          }),
-          h('path', {
-            d: 'M6.4 4.9h5M6.4 9.1h5',
-            stroke: 'currentColor',
-            strokeWidth: 1.6,
-            strokeLinecap: 'round',
-          }),
-        ),
+        h(QuoteIcon, { size: 14 }),
       );
     }
 
@@ -719,187 +698,64 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The file/folder context menu published by the workspace tree. One row
-     * quotes the entry as an `@` reference chip.
-     * @param props - locale seat (`t`) for the visible label.
-     * @returns the menu while an entry row requested it; null otherwise.
+     * Build the shared menu rows for one captured file or directory target.
+     * The row stays visible, disabled, while its Session composer is unmounted,
+     * so the menu does not change shape between Sessions.
+     * @param rootCtx - the plugin's client root context.
+     * @param t - translate function bound to this plugin's dictionary.
+     * @param kind - `file` or `folder`.
+     * @param target - the path the host captured for the entry.
+     * @param sessionId - Session that owns the composer and the workspace.
+     * @returns the menu rows for the captured target.
      */
-    function EntryQuoteMenu(props) {
-      const { t } = props;
-      const request = useEntryMenu();
-      const menuRef = React.useRef(null);
-
-      React.useEffect(() => {
-        if (request === null) return undefined;
-        const close = () => request.close();
-        const onPointerDown = (event) => {
-          const node = menuRef.current;
-          if (node !== null && event.target instanceof Node && node.contains(event.target)) return;
-          close();
-        };
-        const onKeyDown = (event) => {
-          if (event.key !== 'Escape') return;
-          event.preventDefault();
-          event.stopPropagation();
-          close();
-        };
-        const onViewportChange = () => close();
-        document.addEventListener('pointerdown', onPointerDown, true);
-        document.addEventListener('keydown', onKeyDown, true);
-        window.addEventListener('scroll', onViewportChange, true);
-        window.addEventListener('resize', onViewportChange);
-        return () => {
-          document.removeEventListener('pointerdown', onPointerDown, true);
-          document.removeEventListener('keydown', onKeyDown, true);
-          window.removeEventListener('scroll', onViewportChange, true);
-          window.removeEventListener('resize', onViewportChange);
-        };
-      }, [request]);
-
-      if (request === null) return null;
-
-      const folder = request.kind === 'folder';
-      const label = folder ? t('menu.quoteFolder') : t('menu.quoteFile');
-      const hint = folder ? t('menu.quoteFolderHint') : t('menu.quoteFileHint');
-
-      const width = 300;
-      const height = 40;
-      const x = Math.min(Math.max(request.x, 8), Math.max(8, window.innerWidth - width - 8));
-      const y = Math.min(Math.max(request.y, 8), Math.max(8, window.innerHeight - height - 8));
-
-      return h(
-        React.Fragment,
-        null,
-        h('style', { dangerouslySetInnerHTML: { __html: CSS } }),
-        h(
-          'div',
-          {
-            ref: menuRef,
-            className: 'dsh-context-quote__menu',
-            role: 'menu',
-            'aria-label': label,
-            style: {
-              position: 'fixed',
-              left: `${x}px`,
-              top: `${y}px`,
-              zIndex: 31,
-              pointerEvents: 'auto',
-            },
+    function entryMenuActions(rootCtx, t, kind, target, sessionId) {
+      const sessions = rootCtx.get('sessions');
+      const cwd = sessions?.list?.getSnapshot?.()?.byId?.[sessionId]?.cwd;
+      const folder = kind === 'folder';
+      // Keep the mention workspace-relative like the shipped @ picker; entries
+      // outside the workspace, and the workspace root itself, stay absolute.
+      const mention = mentionPathOf(target, cwd) || slashPath(target);
+      return [
+        {
+          id: MENU_KEY,
+          icon: { key: MENU_KEY },
+          label: t('menu.quote'),
+          disabled: faceOf(sessionId) === undefined,
+          run: () => {
+            const face = faceOf(sessionId);
+            if (face === undefined) return;
+            const inserter = createInserter(rootCtx, sessionId, face.inputActions);
+            if (folder) inserter.quoteFolder(mention);
+            else inserter.quoteFile(mention);
           },
-          h(
-            'button',
-            {
-              type: 'button',
-              role: 'menuitem',
-              className: 'dsh-context-quote__menuItem',
-              title: hint,
-              autoFocus: true,
-              onClick: () => {
-                try {
-                  request.quote();
-                } finally {
-                  request.close();
-                }
-              },
-            },
-            quoteGlyph(),
-            h('span', { className: 'dsh-context-quote__menuName' }, label),
-            h('span', { className: 'dsh-context-quote__menuPath' }, request.label),
-          ),
-        ),
-      );
+        },
+      ];
     }
 
     /**
      * Build the invisible Session-scope bridge for one plugin instance: it
-     * republishes the composer's public quote action for the root-scope
-     * floating `引用` action.
+     * publishes the composer's public insert face, which both the root-scope
+     * floating action and the context-menu rows resolve.
      * @returns the bridge component.
      */
     function createQuoteBridge() {
       return function QuoteBridge(props) {
-        const { inputActions } = props;
+        const { sessionId, inputActions } = props;
         React.useEffect(() => {
-          publishBridge({
+          if (inputActions === undefined) return undefined;
+          const face = {
+            sessionId,
+            inputActions,
             // The shell owns phase, blank-text, and focus handling: a locked
             // composer refuses the insert and leaves the draft untouched.
             insertQuote: (text) => inputActions.insertQuote(text),
-          });
-          return () => {
-            publishBridge(null);
           };
-        }, [inputActions]);
-        return null;
-      };
-    }
-
-    /**
-     * Build the invisible bridge mounted in a workspace tree's header. It owns
-     * that tree's `contextmenu` handling and publishes the entry menu request.
-     * @param rootCtx - the plugin's client root context.
-     * @returns the tree anchor component.
-     */
-    function createFilesAnchor(rootCtx) {
-      return function FilesQuoteAnchor(props) {
-        const { sessionId, inputActions } = props;
-        const ref = React.useRef(null);
-
-        React.useEffect(() => {
-          const node = ref.current;
-          if (node === null || inputActions === undefined) return undefined;
-          const root = node.closest('[data-files-root]');
-          if (root === null) return undefined;
-
-          /** Turn one entry-row right click into a floating menu request. */
-          const onContextMenu = (event) => {
-            const target = event.target;
-            if (!(target instanceof Element)) return;
-            const row = target.closest(ENTRY_ROW);
-            if (row === null) return;
-            const absolutePath = row.getAttribute('data-files-path');
-            if (absolutePath === null || absolutePath === '') return;
-            // Directory rows are the only ones the tree marks as folders; every
-            // other quotable row is a file. Rows without a kind ("other") keep
-            // the native menu.
-            const entryKind = row.getAttribute('data-files-entry');
-            const folder = entryKind === 'directory';
-            if (!folder && entryKind !== 'file') return;
-            event.preventDefault();
-            event.stopPropagation();
-            const treeRoot = root.getAttribute('data-files-root') ?? '';
-            const mention = mentionPathOf(absolutePath, treeRoot) || slashPath(absolutePath);
-            const name = basenameOf(absolutePath);
-            const rect = row.getBoundingClientRect();
-            const x = event.clientX > 0 ? event.clientX + 2 : rect.left + 12;
-            const y = event.clientY > 0 ? event.clientY + 2 : rect.top + rect.height;
-            publishEntryMenu({
-              owner: root,
-              x,
-              y,
-              kind: folder ? 'folder' : 'file',
-              label: folder ? `${name}/` : name,
-              quote: () => {
-                const inserter = createInserter(rootCtx, sessionId, inputActions);
-                if (folder) inserter.quoteFolder(mention);
-                else inserter.quoteFile(mention);
-              },
-              close: () => closeEntryMenuFor(root),
-            });
-          };
-
-          root.addEventListener('contextmenu', onContextMenu);
+          publishBridge(face);
           return () => {
-            root.removeEventListener('contextmenu', onContextMenu);
-            closeEntryMenuFor(root);
+            withdrawBridge(face);
           };
         }, [inputActions, sessionId]);
-
-        return h('span', {
-          ref,
-          hidden: true,
-          'aria-hidden': true,
-          style: { display: 'none' },
-        });
+        return null;
       };
     }
 
@@ -945,39 +801,52 @@ window.__ModuleLoader__.load({
     }
 
     return {
-      inject: ['slots', 'locale'],
+      inject: ['slots', 'locale', 'contextMenus', 'sessions'],
       /**
-       * Register the dictionaries and every slot contribution.
+       * Register the dictionaries, the shared-menu rows, and every slot
+       * contribution.
        * @param ctx - client root context.
        */
       apply(ctx) {
         ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'context-quote: dictionaries');
+        const t = ctx.locale.bind(NS);
+        // The host owns the file and directory menus; this plugin contributes one
+        // `引用` row to each captured target family. A workspace tree row, the
+        // `files` page directory bar, and a preview path bar all reach these
+        // providers, so no host DOM contract has to be assumed.
+        ctx.effect(
+          () =>
+            ctx.contextMenus.register({
+              id: 'context-quote.file',
+              target: 'file',
+              order: 40,
+              resolve: ({ sessionId, path }) => entryMenuActions(ctx, t, 'file', path, sessionId),
+            }),
+          'context-quote: file menu',
+        );
+        ctx.effect(
+          () =>
+            ctx.contextMenus.register({
+              id: 'context-quote.directory',
+              target: 'directory',
+              order: 40,
+              resolve: ({ sessionId, path }) => entryMenuActions(ctx, t, 'folder', path, sessionId),
+            }),
+          'context-quote: directory menu',
+        );
+        ctx.slots.inject('contextMenu.icon', () =>
+          ctx.slots.register({ name: 'contextMenu.icon', key: MENU_KEY }, QuoteIcon),
+        );
         ctx.slots.inject('shell.overlay', () =>
           ctx.slots.register(
             { name: 'shell.overlay', id: 'context-quote-action', order: 20, locale: NS },
             QuoteAction,
           ),
         );
-        ctx.slots.inject('shell.overlay', () =>
-          ctx.slots.register(
-            { name: 'shell.overlay', id: 'context-quote-entry-menu', order: 21, locale: NS },
-            EntryQuoteMenu,
-          ),
-        );
         ctx.slots.inject('conversation.input.overlay', () =>
           ctx.slots.register(
             { name: 'conversation.input.overlay', id: 'context-quote-bridge', order: 90 },
             createQuoteBridge(),
-          ),
-        );
-        ctx.slots.inject('sidebar.right.tab.files.actions', () =>
-          ctx.slots.register(
-            {
-              name: 'sidebar.right.tab.files.actions',
-              id: 'context-quote-file-tree',
-              locale: NS,
-            },
-            createFilesAnchor(ctx),
           ),
         );
         ctx.slots.inject('sidebar.right.tab.document.actions', () =>
