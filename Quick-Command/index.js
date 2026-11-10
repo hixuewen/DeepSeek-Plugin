@@ -33,22 +33,27 @@ const MAX_BODY_BYTES = 64 * 1024;
 /** End-to-end budget for one model call. */
 const TIMEOUT_MS = 8000;
 
-/** Output cap: the reply is a short action, never prose. */
-const MAX_TOKENS = 96;
+/** Output cap: a handful of short actions, never prose. */
+const MAX_TOKENS = 320;
+
+/** How many replies one answer may return. */
+export const MAX_REPLIES = 5;
 
 /**
- * Instruction for the extractor. JSON output keeps the reply separable from any
- * commentary a model may add; the "时 / 的话 / 即可" note guards the exact bug
- * this feature exists to fix ("发版时" instead of "发版").
+ * Instruction for the extractor. JSON output keeps the replies separable from
+ * any commentary a model may add; the option wording covers answers that list
+ * several next steps and ask which one to take; the "时 / 的话 / 即可" note
+ * guards the exact bug this feature exists to fix ("发版时" instead of "发版").
  */
 const SYSTEM_PROMPT = [
-  'You extract the one short reply a user should send to an AI coding assistant.',
+  'You extract the short replies a user could send back to an AI coding assistant.',
   "You are given the assistant's latest answer. Decide whether it is asking the user for a short reply:",
   'a next-step confirmation, an offer it waits on ("say the word and I will release"), or a prerequisite it',
-  'waits for the user to finish. If so, reply with the action alone, e.g. "发版", "继续修复", "写这个工具".',
+  'waits for the user to finish. If it lists two or more options and asks the user to pick one, return one',
+  'reply per option in the listed order. Otherwise return the single action, e.g. "发版", "继续修复", "写这个工具".',
   'Do not include condition words such as 时 / 的话 / 之后, particles such as 吗 / 呢 / 吧, or 即可.',
-  'Do not include file references that start with @. Do not explain. If no short reply is requested, reply with "".',
-  'Return only one JSON object, exactly {"reply":"..."}, and nothing else.',
+  'Do not include file references that start with @. Do not explain. If no short reply is requested, return an empty list.',
+  'Return only one JSON object, exactly {"replies":["..."]}, and nothing else.',
 ].join(' ');
 
 /** JSON response helper. */
@@ -90,38 +95,59 @@ export function cleanReply(raw) {
 }
 
 /**
- * Read the reply out of model output.
+ * Clean a list of candidate replies, keeping order and dropping duplicates.
  *
- * The prompt asks for `{"reply":"..."}`; a model that ignores the wrapper and
- * answers with the bare action still counts, while malformed JSON or commentary
- * falls back to no reply (the client then keeps its local heuristic result).
+ * @param rawList - values returned by the model.
+ * @returns up to `MAX_REPLIES` cleaned replies, possibly empty.
+ */
+export function cleanReplyList(rawList) {
+  const replies = [];
+  for (const raw of Array.isArray(rawList) ? rawList : []) {
+    const reply = cleanReply(raw);
+    if (!reply || replies.includes(reply)) continue;
+    replies.push(reply);
+    if (replies.length >= MAX_REPLIES) break;
+  }
+  return replies;
+}
+
+/**
+ * Read the replies out of model output.
+ *
+ * The prompt asks for `{"replies":["..."]}`; a model that ignores the wrapper
+ * and answers with the bare action still counts, `{"reply":"..."}` from an
+ * older prompt is accepted too, and malformed JSON falls back to no reply (the
+ * client then keeps its local heuristic result).
  *
  * @param raw - complete model text.
- * @returns the cleaned reply, or an empty string.
+ * @returns the cleaned replies, possibly empty.
  */
 export function parseModelOutput(raw) {
   const text = String(raw ?? '').trim();
-  if (!text) return '';
+  if (!text) return [];
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
   // No brace at all: the model answered with the bare action.
-  if (start < 0) return cleanReply(text);
+  if (start < 0) return cleanReplyList([text]);
   // A brace with no closing brace is a truncated JSON object, not a reply.
-  if (end <= start) return '';
+  if (end <= start) return [];
   try {
     const parsed = JSON.parse(text.slice(start, end + 1));
-    return cleanReply(parsed && parsed.reply);
+    if (!parsed || typeof parsed !== 'object') return [];
+    if (Array.isArray(parsed.replies)) return cleanReplyList(parsed.replies);
+    if (typeof parsed.reply === 'string') return cleanReplyList([parsed.reply]);
+    return [];
   } catch {
-    return '';
+    return [];
   }
 }
 
 /**
- * Ask the Deployment's model for the reply, with a hard timeout and an output cap.
+ * Ask the Deployment's model for the replies, with a hard timeout and an output cap.
  *
  * @param ctx - host context providing `llm` and `agentDefaultModel`.
  * @param text - the Agent's latest answer.
- * @returns the cleaned reply, or an empty string when the model asks for none.
+ * @returns the cleaned replies, empty when the model asks for none.
  * @throws when the route is unavailable, the model fails, or the call times out.
  */
 export async function analyzeText(ctx, text) {
@@ -229,8 +255,9 @@ async function handleAnalyze(ctx, req, res) {
   }
 
   try {
-    const reply = await analyzeText(ctx, text);
-    sendJson(res, 200, { reply });
+    const replies = await analyzeText(ctx, text);
+    // `reply` stays for a client running an older cached bundle.
+    sendJson(res, 200, { replies, reply: replies[0] ?? '' });
   } catch {
     sendJson(res, 502, { error: 'analyze-failed' });
   }

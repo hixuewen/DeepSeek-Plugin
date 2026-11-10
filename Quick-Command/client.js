@@ -18,21 +18,24 @@
  * commands are persisted under `STORAGE_KEY`, and the ids of deleted built-ins
  * under `HIDDEN_KEY`.
  *
- * The leading chip is not stored: it is derived from the Agent's latest answer.
- * When that answer ends by asking the user to reply with an exact action — for
- * example "直接说「继续修复编译」即可" or a one-word confirmation such as
- * "你只需要确认一句：「写这个工具」" — the action becomes a suggestion chip
- * in front of every built-in and custom command. A plain statement also counts:
+ * The leading chips are not stored: they are derived from the Agent's latest
+ * answer. When that answer ends by asking the user to reply with an exact action
+ * — for example "直接说「继续修复编译」即可" or a one-word confirmation such as
+ * "你只需要确认一句：「写这个工具」" — the action becomes a suggestion chip in
+ * front of every built-in and custom command. A plain statement also counts:
  * when the Agent waits for the user to finish a prerequisite and report back,
  * such as "登录完成后告诉我，我读取 C:\temp\frida 的结果。", the prerequisite
  * becomes a "登录完成" chip; when it offers to do the next step and waits for
- * the word, such as "需要我发版的话说一声。", "发版" becomes the chip. A derived
- * chip that matches an existing command text exactly is dropped. It follows
- * each new answer and disappears when no action can be extracted.
+ * the word, such as "需要我发版的话说一声。", "发版" becomes the chip. When the
+ * answer lists several next steps and asks which one to take, each option
+ * becomes its own chip (up to five), in the listed order, and the "which one"
+ * question itself never becomes a chip. Derived chips that match an existing
+ * command text exactly are dropped. They follow each new answer and disappear
+ * when no action can be extracted.
  *
  * The local extractor is a heuristic. With the "AI 解析建议" switch on, the row
  * asks the Host (`index.js`, same origin) to read the answer with the
- * Deployment's default model; that reply replaces the local one, and any
+ * Deployment's default model; the replies replace the local ones, and any
  * failure falls back to local rules. The switch is off by default and the
  * answer text is only sent when the user turns it on.
  */
@@ -86,6 +89,8 @@ window.__ModuleLoader__.load({
       'hint.custom': '点击把这条自定义命令发送给 Agent',
       'hint.suggestion':
         '从 Agent 最后一条回答里提取的下一步动作（它让你回复的短句、提问或等待你完成的事项），点击直接发送',
+      'hint.option':
+        '从 Agent 最后一条回答里提取的选项之一，点击把这一项发送给 Agent',
       'add.label': '添加',
       'add.hint': '手动添加一条快捷命令',
       'add.placeholder': '输入命令文字',
@@ -117,6 +122,8 @@ window.__ModuleLoader__.load({
       'hint.custom': 'Send this custom command to the agent',
       'hint.suggestion':
         'The next action extracted from the agent’s last answer (a short reply it asks for, a question, or something it waits for you to finish). Click to send it',
+      'hint.option':
+        'One of the options extracted from the agent’s last answer. Click to send this one',
       'add.label': 'Add',
       'add.hint': 'Add a custom quick command',
       'add.placeholder': 'Command text',
@@ -729,6 +736,225 @@ window.__ModuleLoader__.load({
       return extractWaitingAction(source);
     };
 
+    /* --- options: several chips when the answer offers a choice ----------- */
+
+    /** How many option chips one answer may produce. */
+    const MAX_OPTIONS = 5;
+
+    /** How much text after a list is inspected for the closing question. */
+    const OPTION_TAIL_WINDOW = 160;
+
+    /** Ordinals that may introduce one option inside a single prose line. */
+    const INLINE_MARKER = /[①-⑳]|[(（]\d{1,2}[)）]/gu;
+
+    /**
+     * Words that introduce a set of options the user should choose from.
+     * A list only becomes chips when one of these, or a choice question,
+     * surrounds it; otherwise it is ordinary prose.
+     */
+    const CHOICE_LEAD =
+      /(?:下一步|接下来|后续|选项|可选|方案|顺序|选择|哪一?[个项步]|options?|choose|pick)/iu;
+
+    /** A closing question that asks the user to pick one of the options. */
+    const CHOICE_AFTER =
+      /(?:哪一?[个项步]|选哪|要选|先做哪|先修哪|按哪|which one|which (?:should|would|do))/iu;
+
+    /**
+     * Blank out fenced code blocks: numbered lines there are output, not
+     * options, and must never turn into chips.
+     *
+     * @param text - full assistant prose.
+     * @returns the text with fenced blocks removed.
+     */
+    const withoutFences = (text) =>
+      String(text ?? '')
+        .replace(/```[\s\S]*?```/gu, '')
+        .replace(/^[ \t]*~~~[\s\S]*?^[ \t]*~~~/gmu, '');
+
+    /**
+     * Split one option from the tail that follows its sentence.
+     *
+     * Parentheses are tracked so an explanatory "（改动小、可测）；" keeps its
+     * closing comma instead of ending the option at the wrong place.
+     *
+     * @param text - raw option fragment.
+     * @returns `{ item, tail }`, both trimmed by the caller.
+     */
+    const cutOptionTail = (text) => {
+      let depth = 0;
+      for (let index = 0; index < text.length; index += 1) {
+        const char = text[index];
+        if (char === '（' || char === '(') depth += 1;
+        else if (char === '）' || char === ')') depth = Math.max(0, depth - 1);
+        else if (depth === 0 && '。！？!?；;\n'.includes(char)) {
+          return { item: text.slice(0, index), tail: text.slice(index + 1) };
+        }
+      }
+      return { item: text, tail: '' };
+    };
+
+    /**
+     * Strip the ordinal or bullet that introduces one list line.
+     *
+     * A dot followed by a digit stays put, so "1.4.0 已发布" is not an option.
+     *
+     * @param line - one raw line.
+     * @returns the item text, or an empty string when the line is not a list item.
+     */
+    const stripOptionMarker = (line) => {
+      const text = String(line ?? '').trim();
+      let match = text.match(/^([①-⑳])\s*(.+)$/u);
+      if (match) return match[2];
+      match = text.match(/^[(（]\d{1,2}[)）]\s*(.+)$/u);
+      if (match) return match[1];
+      match = text.match(/^(\d{1,2})([.．、)）])\s*(.+)$/u);
+      if (match) {
+        if (
+          (match[2] === '.' || match[2] === '．') &&
+          /^\d/u.test(match[3])
+        ) {
+          return '';
+        }
+        return match[3];
+      }
+      match = text.match(/^[-*•·]\s+(.+)$/u);
+      if (match) return match[1];
+      match = text.match(/^[a-zA-Z][.)]\s+(.+)$/u);
+      if (match) return match[1];
+      return '';
+    };
+
+    /**
+     * Turn one raw option into a sendable command.
+     *
+     * A trailing parenthetical note such as "（改动小、可测）" is dropped so the
+     * chip reads like the task title; when the parenthesis is the whole option
+     * it is kept.
+     *
+     * @param raw - raw item text.
+     * @returns the cleaned option, or an empty string.
+     */
+    const cleanOption = (raw) => {
+      const value = cleanAction(raw);
+      if (!value) return '';
+      const trimmed = value
+        .replace(/\s*[（(][^（）()]{1,80}[）)]\s*$/u, '')
+        .trim();
+      return trimmed.length >= 2 ? trimmed : value;
+    };
+
+    /**
+     * Read the closest prose line above a block, skipping list lines so the
+     * lead-in of one list is not taken from the items of another.
+     *
+     * @param source - whole (fence-free) answer.
+     * @param start - character offset where the block starts.
+     * @returns the lead-in line, or an empty string.
+     */
+    const leadLineOf = (source, start) => {
+      const before = source.slice(Math.max(0, start - 200), start);
+      const lines = before.split('\n');
+      for (let index = lines.length - 1; index >= 0; index -= 1) {
+        const line = lines[index].trim();
+        if (!line || stripOptionMarker(line)) continue;
+        return line;
+      }
+      return '';
+    };
+
+    /**
+     * Split one line that carries several inline ordinals, as in
+     * "① 剪贴板兼容；② 多会话槽；③ 命令定名。".
+     *
+     * @param line - one raw line.
+     * @returns `{ lead, items, tail }`, or null when fewer than two markers.
+     */
+    const inlineOptionsOf = (line) => {
+      const markers = [...line.matchAll(INLINE_MARKER)];
+      if (markers.length < 2) return null;
+      const lead = line.slice(0, markers[0].index).trim();
+      const items = [];
+      let tail = '';
+      for (let index = 0; index < markers.length; index += 1) {
+        const from = markers[index].index + markers[index][0].length;
+        const to =
+          index + 1 < markers.length ? markers[index + 1].index : line.length;
+        const cut = cutOptionTail(line.slice(from, to));
+        items.push(cut.item);
+        if (cut.tail) tail += `${cut.tail} `;
+      }
+      return { lead, items, tail };
+    };
+
+    /**
+     * Extract the options an answer offers, when it asks the user to pick one.
+     *
+     * Only the last option block counts: the closing ask belongs to the list
+     * right above it. A block needs at least two distinct items and must be
+     * introduced by a choice lead-in or followed by a choice question;
+     * otherwise the answer keeps the single-action suggestion.
+     *
+     * @param text - the latest assistant prose.
+     * @returns 2-5 cleaned options, or an empty array when none is offered.
+     */
+    const extractSuggestedOptions = (text) => {
+      const source = withoutFences(text);
+      if (!source.trim()) return [];
+
+      const blocks = [];
+      let offset = 0;
+      let run = null;
+      for (const line of source.split('\n')) {
+        const item = stripOptionMarker(line);
+        const inline = item ? null : inlineOptionsOf(line);
+        if (item) {
+          if (!run) {
+            run = { start: offset, end: offset + line.length, items: [] };
+          }
+          run.items.push(item);
+          run.end = offset + line.length;
+        } else {
+          if (run) {
+            blocks.push(run);
+            run = null;
+          }
+          if (inline) {
+            blocks.push({
+              start: offset,
+              end: offset + line.length,
+              items: inline.items,
+              lead: inline.lead,
+              tail: inline.tail,
+            });
+          }
+        }
+        offset += line.length + 1;
+      }
+      if (run) blocks.push(run);
+
+      for (let index = blocks.length - 1; index >= 0; index -= 1) {
+        const block = blocks[index];
+        const lead = [block.lead, leadLineOf(source, block.start)]
+          .filter(Boolean)
+          .join(' ');
+        const tail = `${block.tail || ''} ${source.slice(
+          block.end,
+          block.end + OPTION_TAIL_WINDOW,
+        )}`;
+        if (!CHOICE_LEAD.test(lead) && !CHOICE_AFTER.test(tail)) continue;
+
+        const options = [];
+        for (const raw of block.items) {
+          const option = cleanOption(cutOptionTail(raw).item);
+          if (!option || options.includes(option)) continue;
+          options.push(option);
+          if (options.length >= MAX_OPTIONS) break;
+        }
+        if (options.length >= 2) return options;
+      }
+      return [];
+    };
+
     /**
      * Join the prose blocks of one finalized assistant message.
      *
@@ -889,10 +1115,10 @@ window.__ModuleLoader__.load({
      * Remember one analyzed answer, keeping the cache bounded.
      *
      * @param answer - the assistant text that was analyzed.
-     * @param reply - the extracted reply, possibly empty.
+     * @param replies - the extracted replies, possibly empty.
      */
-    const rememberAnalyzed = (answer, reply) => {
-      analyzedAnswers.set(answer, reply);
+    const rememberAnalyzed = (answer, replies) => {
+      analyzedAnswers.set(answer, replies);
       while (analyzedAnswers.size > AI_CACHE_LIMIT) {
         const oldest = analyzedAnswers.keys().next().value;
         analyzedAnswers.delete(oldest);
@@ -1052,32 +1278,51 @@ window.__ModuleLoader__.load({
       const [ai, setAi] = React.useState({
         answer: '',
         status: 'idle',
-        reply: '',
+        replies: [],
       });
 
-      // The leading chip is derived, never stored. Local rules show instantly;
-      // the model's reply replaces them once it lands, and a disabled switch
-      // keeps the local path. Either way a duplicate command hides the chip.
-      const localSuggestion = React.useMemo(
-        () => (visible ? extractAction(lastAnswer) : ''),
-        [visible, lastAnswer],
-      );
+      // Suggested chips are derived, never stored. When the answer offers a
+      // choice, every option becomes one chip; otherwise the single extracted
+      // action does. Local rules show instantly, the model's replies replace
+      // them once they land, and a disabled switch keeps the local path.
+      const local = React.useMemo(() => {
+        if (!visible) return { options: [], action: '' };
+        const options = extractSuggestedOptions(lastAnswer);
+        return {
+          options,
+          action: options.length ? '' : extractAction(lastAnswer),
+        };
+      }, [visible, lastAnswer]);
       const aiReady = ai.answer === lastAnswer && ai.status === 'done';
-      const candidate = aiEnabled && aiReady ? ai.reply : localSuggestion;
-      const suggestion = React.useMemo(
-        () => (candidate && !isDuplicate(candidate) ? candidate : ''),
-        [candidate, builtin, custom],
-      );
+      const candidate = React.useMemo(() => {
+        if (aiEnabled && aiReady) return ai.replies;
+        if (local.options.length) return local.options;
+        return local.action ? [local.action] : [];
+      }, [aiEnabled, aiReady, ai.replies, local]);
+      const suggestions = React.useMemo(() => {
+        const result = [];
+        for (const raw of candidate) {
+          const option = cleanOption(raw);
+          if (!option || result.includes(option) || isDuplicate(option)) {
+            continue;
+          }
+          result.push(option);
+          if (result.length >= MAX_OPTIONS) break;
+        }
+        return result;
+      }, [candidate, builtin, custom]);
+      /** Whether the row shows several options instead of one next action. */
+      const manySuggestions = suggestions.length > 1;
 
       // Ask the Host's model once per answer; the answer text is the cache key.
       React.useEffect(() => {
         if (!visible || !aiEnabled || !lastAnswer) {
-          setAi({ answer: '', status: 'idle', reply: '' });
+          setAi({ answer: '', status: 'idle', replies: [] });
           return undefined;
         }
         const cached = analyzedAnswers.get(lastAnswer);
         if (cached !== undefined) {
-          setAi({ answer: lastAnswer, status: 'done', reply: cached });
+          setAi({ answer: lastAnswer, status: 'done', replies: cached });
           return undefined;
         }
 
@@ -1087,7 +1332,7 @@ window.__ModuleLoader__.load({
           () => controller.abort(),
           AI_TIMEOUT_MS,
         );
-        setAi({ answer: lastAnswer, status: 'loading', reply: '' });
+        setAi({ answer: lastAnswer, status: 'loading', replies: [] });
 
         fetch(AI_ROUTE, {
           method: 'POST',
@@ -1103,14 +1348,19 @@ window.__ModuleLoader__.load({
           )
           .then((data) => {
             if (cancelled) return;
-            const reply =
-              data && typeof data.reply === 'string' ? data.reply : '';
-            rememberAnalyzed(lastAnswer, reply);
-            setAi({ answer: lastAnswer, status: 'done', reply });
+            // `reply` keeps an older Host (before a DSH restart) working.
+            const replies =
+              data && Array.isArray(data.replies)
+                ? data.replies.filter((item) => typeof item === 'string')
+                : data && typeof data.reply === 'string' && data.reply
+                  ? [data.reply]
+                  : [];
+            rememberAnalyzed(lastAnswer, replies);
+            setAi({ answer: lastAnswer, status: 'done', replies });
           })
           .catch(() => {
             if (cancelled) return;
-            setAi({ answer: lastAnswer, status: 'error', reply: '' });
+            setAi({ answer: lastAnswer, status: 'error', replies: [] });
           })
           .finally(() => window.clearTimeout(timer));
 
@@ -1271,14 +1521,16 @@ window.__ModuleLoader__.load({
        *
        * @param command - `{ id, text }` to display and send.
        * @param kind - `builtin`, `custom`, or the derived `suggestion`.
+       * @param hint - tooltip override, used to tell options from one action.
        */
-      const renderChip = (command, kind) => {
-        const hint =
-          kind === 'suggestion'
+      const renderChip = (command, kind, hint) => {
+        const title =
+          hint ??
+          (kind === 'suggestion'
             ? t('hint.suggestion')
             : kind === 'custom'
               ? t('hint.custom')
-              : t(`hint.${command.id}`);
+              : t(`hint.${command.id}`));
         return h(
           'button',
           {
@@ -1288,7 +1540,7 @@ window.__ModuleLoader__.load({
               kind === 'suggestion'
                 ? 'dsh-quick-commands__chip dsh-quick-commands__chip--suggestion'
                 : 'dsh-quick-commands__chip',
-            title: hint,
+            title,
             onClick: (event) => {
               event.preventDefault();
               run(command.text);
@@ -1301,9 +1553,15 @@ window.__ModuleLoader__.load({
 
       const renderChipRow = () => {
         const chips = [];
-        if (suggestion) {
-          chips.push(renderChip({ id: 'next', text: suggestion }, 'suggestion'));
-        }
+        suggestions.forEach((text, index) => {
+          chips.push(
+            renderChip(
+              { id: String(index), text },
+              'suggestion',
+              manySuggestions ? t('hint.option') : t('hint.suggestion'),
+            ),
+          );
+        });
         chips.push(
           ...builtin.map((command) => renderChip(command, 'builtin')),
           ...custom.map((command) => renderChip(command, 'custom')),

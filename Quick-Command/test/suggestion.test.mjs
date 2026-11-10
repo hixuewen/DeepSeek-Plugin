@@ -22,9 +22,9 @@ const end = source.indexOf(END);
 assert.ok(start >= 0 && end > start, 'extraction section markers missing');
 
 const compile = new Function(
-  `const MAX_LENGTH = 40;\n${source.slice(start, end)}\nreturn { extractAction, extractWaitingAction };`,
+  `const MAX_LENGTH = 40;\n${source.slice(start, end)}\nreturn { extractAction, extractWaitingAction, extractSuggestedOptions };`,
 );
-const { extractAction } = compile();
+const { extractAction, extractSuggestedOptions } = compile();
 
 const cases = [
   // Replies the Agent quotes directly.
@@ -140,4 +140,125 @@ test('does not turn a bare @ reference into a chip', () => {
     '',
   );
   assert.equal(extractAction('请回复「@Quick-Command/」继续'), '');
+});
+
+/* --- several options: an answer that asks the user to pick one ------------- */
+
+const CHOICE_ANSWER = [
+  '4. 当前状态',
+  '',
+  '- .14：4899 原版 RServer3；4901 我们的 RadminServer',
+  '- 全部新证据与结论已写入 lab-20261110/README.md',
+  '- 改动未提交：InputProtocol.cs、ClientSession.cs',
+  '',
+  '下一步建议按这个顺序：① 剪贴板 1 字节兼容（改动小、可测）；② 多会话槽支持 chat/voice；③ 继续用 /file /shutdown 的动作把剩余命令字节逐个定名。需要我接着做哪一项？',
+].join('\n');
+
+test('extracts every inline option the closing question asks to pick', () => {
+  assert.deepEqual(extractSuggestedOptions(CHOICE_ANSWER), [
+    '剪贴板 1 字节兼容',
+    '多会话槽支持 chat/voice',
+    '继续用 /file /shutdown 的动作把剩余命令字节逐个定名',
+  ]);
+});
+
+test('extracts a markdown list under a choice lead-in', () => {
+  const answer = [
+    '可选方案：',
+    '1. 剪贴板兼容',
+    '2. 多会话槽',
+    '3. 命令定名',
+    '',
+    '需要我按哪一个来？',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    '剪贴板兼容',
+    '多会话槽',
+    '命令定名',
+  ]);
+});
+
+test('extracts options numbered with 、 after 请选择', () => {
+  const answer = '请选择：\n1、先修剪贴板\n2、先做多会话槽';
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    '先修剪贴板',
+    '先做多会话槽',
+  ]);
+});
+
+test('extracts full-width bracketed options', () => {
+  const answer = '下一步先做哪一项？\n（1）剪贴板兼容\n（2）多会话槽';
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    '剪贴板兼容',
+    '多会话槽',
+  ]);
+});
+
+test('extracts English options under Options/Which one', () => {
+  const answer =
+    'Options:\n1. Fix the clipboard path\n2. Add multi-session slots\n\nWhich one should I do next?';
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    'Fix the clipboard path',
+    'Add multi-session slots',
+  ]);
+});
+
+test('keeps at most five options', () => {
+  const answer = [
+    '下一步按这个顺序：',
+    '1. 改剪贴板',
+    '2. 改会话槽',
+    '3. 改命令表',
+    '4. 改文档',
+    '5. 补测试',
+    '6. 发版',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    '改剪贴板',
+    '改会话槽',
+    '改命令表',
+    '改文档',
+    '补测试',
+  ]);
+});
+
+test('leaves a plain list in an answer alone', () => {
+  assert.deepEqual(
+    extractSuggestedOptions(
+      '- .14：4899 原版 RServer3\n- 全部证据已写入 README\n- 改动未提交',
+    ),
+    [],
+  );
+  assert.deepEqual(
+    extractSuggestedOptions('改动包括：\n1. 新增提取函数\n2. 调整样式'),
+    [],
+  );
+  assert.deepEqual(extractSuggestedOptions('下一步做：\n1. 改剪贴板'), []);
+});
+
+test('needs two distinct options to become a chip row', () => {
+  assert.deepEqual(
+    extractSuggestedOptions('下一步按这个顺序：\n1. 改剪贴板\n2. 改剪贴板'),
+    [],
+  );
+});
+
+test('ignores numbered lines inside a code fence', () => {
+  const answer = [
+    '输出如下：',
+    '```',
+    '1. 剪贴板兼容',
+    '2. 多会话槽',
+    '```',
+    '需要我按哪一个来？',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), []);
+});
+
+test('keeps a parenthetical that is the whole option', () => {
+  const answer = '下一步按这个顺序：\n1. （先等构建结果）\n2. 改剪贴板';
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    '（先等构建结果）',
+    '改剪贴板',
+  ]);
 });

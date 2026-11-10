@@ -19,13 +19,31 @@ test('cleans one short reply', () => {
   assert.equal(cleanReply('x'.repeat(41)), '');
 });
 
-test('parses the JSON reply and a bare reply', () => {
-  assert.equal(parseModelOutput('{"reply":"发版"}'), '发版');
-  assert.equal(parseModelOutput('```json\n{"reply":"继续修复"}\n```'), '继续修复');
-  assert.equal(parseModelOutput('发版'), '发版');
-  assert.equal(parseModelOutput('{"reply":""}'), '');
-  assert.equal(parseModelOutput('{"reply": '), '');
-  assert.equal(parseModelOutput(''), '');
+test('parses one JSON reply, a bare reply, and several replies', () => {
+  assert.deepEqual(parseModelOutput('{"reply":"发版"}'), ['发版']);
+  assert.deepEqual(parseModelOutput('```json\n{"reply":"继续修复"}\n```'), [
+    '继续修复',
+  ]);
+  assert.deepEqual(parseModelOutput('发版'), ['发版']);
+  assert.deepEqual(parseModelOutput('{"reply":""}'), []);
+  assert.deepEqual(parseModelOutput('{"reply": '), []);
+  assert.deepEqual(parseModelOutput(''), []);
+  assert.deepEqual(
+    parseModelOutput('{"replies":["剪贴板兼容","多会话槽","命令定名"]}'),
+    ['剪贴板兼容', '多会话槽', '命令定名'],
+  );
+});
+
+test('caps the replies of a list at five and drops duplicates', () => {
+  assert.deepEqual(
+    parseModelOutput('{"replies":["改剪贴板","改会话槽","改剪贴板","","无"]}'),
+    ['改剪贴板', '改会话槽'],
+  );
+  assert.deepEqual(parseModelOutput('{"replies":[]}'), []);
+  assert.deepEqual(
+    parseModelOutput('{"replies":["a1","a2","a3","a4","a5","a6"]}'),
+    ['a1', 'a2', 'a3', 'a4', 'a5'],
+  );
 });
 
 /** Build a Host context whose model streams the given chunks. */
@@ -57,9 +75,9 @@ test('analyzes through the default model route', async () => {
     calls,
   );
 
-  assert.equal(
+  assert.deepEqual(
     await analyzeText(ctx, '没有打标签，也没有发版；需要发版时告诉我'),
-    '发版',
+    ['发版'],
   );
   assert.equal(calls.length, 1);
   assert.equal(calls[0].provider, 'deepseek-official');
@@ -67,19 +85,39 @@ test('analyzes through the default model route', async () => {
   assert.equal(calls[0].messages[0].role, 'user');
   assert.match(calls[0].messages[0].content[0].text, /需要发版时告诉我/u);
   assert.match(calls[0].system, /Return only one JSON object/u);
-  assert.equal(calls[0].maxTokens, 96);
+  assert.match(calls[0].system, /replies/u);
+  assert.equal(calls[0].maxTokens, 320);
+});
+
+test('returns every option the model lists', async () => {
+  const calls = [];
+  const ctx = fakeCtx(
+    [
+      {
+        type: 'text-delta',
+        index: 0,
+        text: '{"replies":["剪贴板兼容","多会话槽","命令定名"]}',
+      },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ],
+    calls,
+  );
+  assert.deepEqual(
+    await analyzeText(ctx, '下一步按这个顺序：① 剪贴板兼容；② 多会话槽；③ 命令定名'),
+    ['剪贴板兼容', '多会话槽', '命令定名'],
+  );
 });
 
 test('falls back to no reply when the model asks for none', async () => {
   const calls = [];
   const ctx = fakeCtx(
     [
-      { type: 'text-delta', index: 0, text: '{"reply":""}' },
+      { type: 'text-delta', index: 0, text: '{"replies":[]}' },
       { type: 'finish', reason: { kind: 'stop' } },
     ],
     calls,
   );
-  assert.equal(await analyzeText(ctx, '总结一下改动'), '');
+  assert.deepEqual(await analyzeText(ctx, '总结一下改动'), []);
 });
 
 test('rejects a failed model finish', async () => {
@@ -91,5 +129,5 @@ test('rejects a failed model finish', async () => {
 test('rejects an empty stream', async () => {
   const calls = [];
   const ctx = fakeCtx([], calls);
-  assert.equal(await analyzeText(ctx, '需要发版时告诉我'), '');
+  assert.deepEqual(await analyzeText(ctx, '需要发版时告诉我'), []);
 });
