@@ -753,11 +753,26 @@ window.__ModuleLoader__.load({
      * surrounds it; otherwise it is ordinary prose.
      */
     const CHOICE_LEAD =
-      /(?:下一步|接下来|后续|选项|可选|方案|顺序|选择|哪一?[个项步]|options?|choose|pick)/iu;
+      /(?:下一步|接下来|后续|选项|可选|备选|方案|顺序|选择|二选一|选一?个|挑一?个|方向|做法|办法|走法|两条路|三条路|路线|路子|两种做法|两种方案|两个方向|两个选择|哪条路|options?|choose|pick)/iu;
 
     /** A closing question that asks the user to pick one of the options. */
     const CHOICE_AFTER =
-      /(?:哪一?[个项步]|选哪|要选|先做哪|先修哪|按哪|which one|which (?:should|would|do))/iu;
+      /(?:哪一?[个项步条种样]|选哪|要选|挑哪|走哪|用哪|先做哪|先修哪|按哪|怎么选|你定|你决定|which one|which (?:should|would|do)|what do you want)/iu;
+
+    /**
+     * Lead-ins that introduce a report rather than a choice: a list under one
+     * of these stays prose even when it ends the answer and every item starts
+     * with a verb.
+     */
+    const NEGATIVE_LEAD =
+      /(?:改动|变更|修改点|修改内容|改动点|已完成|已经完成|完成情况|证据|结论|输出|结果|状态|清单|包含|包括|涉及|如下|目录|进度|测试结果|日志)/u;
+
+    /**
+     * Verbs that start a plausible option: an enumerated list that ends the
+     * answer becomes chips when every item reads like one of these actions.
+     */
+    const ACTION_START =
+      /^(?:写|重写|实现|修改|改成|改用|换成|替换|添加|新增|增加|加上|删除|移除|修复|修好|重构|迁移|升级|更新|安装|装上|部署|发版|发布|提交|推送|打标签|运行|执行|跑|测试|编译|构建|启动|重启|关机|关闭|停止|回滚|重置|清理|优化|补充|补|接入|对接|提取|验证|检查|排查|调查|继续|接着|试|先|用|把|换)/u;
 
     /**
      * Blank out fenced code blocks: numbered lines there are output, not
@@ -887,6 +902,46 @@ window.__ModuleLoader__.load({
     };
 
     /**
+     * Split one paragraph that enumerates its options inline, as in
+     * "1、写一个 Python 版旧版客户端；2、重启 VM。".
+     *
+     * Only markers numbered from 1 in order count, and a dot followed by a
+     * digit is not a marker, so "v1.4" and "1.4.0" in prose stay in place.
+     *
+     * @param line - one raw line.
+     * @returns `{ lead, items, tail }`, or null when the line is not a list.
+     */
+    const inlineNumberedOptionsOf = (line) => {
+      const text = String(line ?? '');
+      const markers = [];
+      for (const match of text.matchAll(/(\d{1,2})(?:[、)）]|[.．](?!\d))/gu)) {
+        const before = text.slice(0, match.index);
+        if (before && !/[；;，,、：:\s]$/u.test(before)) continue;
+        markers.push({
+          number: Number(match[1]),
+          start: match.index,
+          from: match.index + match[0].length,
+        });
+      }
+      if (markers.length < 2) return null;
+      for (let index = 0; index < markers.length; index += 1) {
+        if (markers[index].number !== index + 1) return null;
+      }
+
+      const lead = text.slice(0, markers[0].start).trim();
+      const items = [];
+      let tail = '';
+      for (let index = 0; index < markers.length; index += 1) {
+        const to =
+          index + 1 < markers.length ? markers[index + 1].start : text.length;
+        const cut = cutOptionTail(text.slice(markers[index].from, to));
+        items.push(cut.item);
+        if (cut.tail) tail += `${cut.tail} `;
+      }
+      return { lead, items, tail };
+    };
+
+    /**
      * Extract the options an answer offers, when it asks the user to pick one.
      *
      * Only the last option block counts: the closing ask belongs to the list
@@ -905,30 +960,41 @@ window.__ModuleLoader__.load({
       let offset = 0;
       let run = null;
       for (const line of source.split('\n')) {
-        const item = stripOptionMarker(line);
-        const inline = item ? null : inlineOptionsOf(line);
-        if (item) {
-          if (!run) {
-            run = { start: offset, end: offset + line.length, items: [] };
-          }
-          run.items.push(item);
-          run.end = offset + line.length;
-        } else {
+        const start = offset;
+        const end = offset + line.length;
+        offset = end + 1;
+
+        // One paragraph may enumerate its options inline ("1、甲；2、乙"),
+        // which takes precedence over reading its first marker as a list line.
+        const inline =
+          inlineNumberedOptionsOf(line) || inlineOptionsOf(line);
+        if (inline) {
           if (run) {
             blocks.push(run);
             run = null;
           }
-          if (inline) {
-            blocks.push({
-              start: offset,
-              end: offset + line.length,
-              items: inline.items,
-              lead: inline.lead,
-              tail: inline.tail,
-            });
-          }
+          blocks.push({ start, end, ...inline });
+          continue;
         }
-        offset += line.length + 1;
+
+        const item = stripOptionMarker(line);
+        if (item) {
+          if (run) {
+            run.items.push(item);
+            run.end = end;
+          } else {
+            run = { start, end, items: [item] };
+          }
+          continue;
+        }
+
+        // A blank line between two items keeps the same list open; any other
+        // prose line closes it.
+        if (run && !line.trim()) continue;
+        if (run) {
+          blocks.push(run);
+          run = null;
+        }
       }
       if (run) blocks.push(run);
 
@@ -941,7 +1007,7 @@ window.__ModuleLoader__.load({
           block.end,
           block.end + OPTION_TAIL_WINDOW,
         )}`;
-        if (!CHOICE_LEAD.test(lead) && !CHOICE_AFTER.test(tail)) continue;
+        const trailing = !source.slice(block.end).trim();
 
         const options = [];
         for (const raw of block.items) {
@@ -950,7 +1016,19 @@ window.__ModuleLoader__.load({
           options.push(option);
           if (options.length >= MAX_OPTIONS) break;
         }
-        if (options.length >= 2) return options;
+        if (options.length < 2) continue;
+
+        if (CHOICE_LEAD.test(lead) || CHOICE_AFTER.test(tail)) return options;
+
+        // The answer ends with an enumerated list and asks nothing after it:
+        // read it as the offered choices when every item names an action.
+        if (
+          trailing &&
+          !NEGATIVE_LEAD.test(lead) &&
+          options.every((option) => ACTION_START.test(option))
+        ) {
+          return options;
+        }
       }
       return [];
     };

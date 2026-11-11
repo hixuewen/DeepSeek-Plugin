@@ -186,6 +186,44 @@ test('extracts options numbered with 、 after 请选择', () => {
   ]);
 });
 
+test('extracts a trailing numbered list that ends the answer', () => {
+  const answer = [
+    '登录已经成功，接下来可以这样做：',
+    '',
+    '1、写一个 Python 版旧版客户端',
+    '2、重启 VM',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    '写一个 Python 版旧版客户端',
+    '重启 VM',
+  ]);
+});
+
+test('extracts a bare trailing list with no lead-in and no question', () => {
+  assert.deepEqual(
+    extractSuggestedOptions('1、写一个 Python 版旧版客户端\n2、重启 VM'),
+    ['写一个 Python 版旧版客户端', '重启 VM'],
+  );
+});
+
+test('extracts options enumerated inline in one paragraph', () => {
+  assert.deepEqual(
+    extractSuggestedOptions('两条路：1、写一个 Python 版旧版客户端；2、重启 VM。'),
+    ['写一个 Python 版旧版客户端', '重启 VM'],
+  );
+  assert.deepEqual(
+    extractSuggestedOptions('1、写一个 Python 版旧版客户端；2、重启 VM'),
+    ['写一个 Python 版旧版客户端', '重启 VM'],
+  );
+});
+
+test('keeps a trailing change list out of the chip row', () => {
+  assert.deepEqual(
+    extractSuggestedOptions('改动包括：\n1、新增提取函数\n2、删除旧样式'),
+    [],
+  );
+});
+
 test('extracts full-width bracketed options', () => {
   const answer = '下一步先做哪一项？\n（1）剪贴板兼容\n（2）多会话槽';
   assert.deepEqual(extractSuggestedOptions(answer), [
