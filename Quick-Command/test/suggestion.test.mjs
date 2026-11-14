@@ -300,3 +300,144 @@ test('keeps a parenthetical that is the whole option', () => {
     '改剪贴板',
   ]);
 });
+
+/* --- tables: one chip per row, first column only --------------------------- */
+
+// The answer that produced the useless "接着做哪一项" chip: four directions in a
+// table, then the closing question.
+const TABLE_ANSWER = [
+  '下一步可继续的方向',
+  '',
+  '| 项 | 可行性 |',
+  '| --- | --- |',
+  '| `0x20 state=0` 的触发条件 | 中（需在真机上复现，比如 UAC 安全桌面/锁屏） |',
+  '| `0xFC` 138B 报文 | 低（只在一次代理会话出现过，缺样本） |',
+  '| 原版 Viewer 对我们服务端 `0x90`（无 15B 尾）的兼容性 | 高（用 UIA 驱动 Viewer 点“获取剪贴板”即可验证） |',
+  '| 服务端多显示器广告（真实两块屏而不是 fake） | 中（需要在服务端机器上插第二块屏或用 VMware 加显示器） |',
+  '',
+  '要我接着做哪一项？',
+].join('\n');
+
+test('extracts every row of a choice table as its own chip', () => {
+  assert.deepEqual(extractSuggestedOptions(TABLE_ANSWER), [
+    '0x20 state=0 的触发条件',
+    '0xFC 138B 报文',
+    '原版 Viewer 对我们服务端 0x90（无 15B 尾）的兼容性',
+    '服务端多显示器广告（真实两块屏而不是 fake）',
+  ]);
+});
+
+test('reads a table without outer pipes or alignment colons', () => {
+  const answer =
+    '下一步可选：\n\n方案 | 风险\n:--- | ---:\n先修协议 | 低\n先做多显示器 | 中';
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    '先修协议',
+    '先做多显示器',
+  ]);
+});
+
+test('extracts a choice table that ends the answer', () => {
+  const answer =
+    '接下来可以走的方向：\n\n| 做法 | 代价 |\n| --- | --- |\n| 先修剪贴板 | 小 |\n| 先做多会话槽 | 中 |';
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    '先修剪贴板',
+    '先做多会话槽',
+  ]);
+});
+
+test('keeps a change table out of the chip row', () => {
+  const answer = [
+    '改动清单',
+    '',
+    '| 文件 | 改动 |',
+    '| --- | --- |',
+    '| client.js | 加表格识别 |',
+    '| README.md | 补文档 |',
+    '',
+    '需要我接着做哪一项？',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), []);
+});
+
+test('keeps a results table at the end of an answer out of the chip row', () => {
+  const answer =
+    '测试结果：\n\n| 用例 | 结果 |\n| --- | --- |\n| 剪贴板 | 通过 |\n| 多显示器 | 失败 |';
+  assert.deepEqual(extractSuggestedOptions(answer), []);
+});
+
+test('needs two table rows to become a chip row', () => {
+  const answer =
+    '下一步可选：\n\n| 方案 | 风险 |\n| --- | --- |\n| 先修协议 | 低 |';
+  assert.deepEqual(extractSuggestedOptions(answer), []);
+});
+
+test('never turns the choice question itself into a chip', () => {
+  assert.equal(extractAction('要我接着做哪一项？'), '');
+  assert.equal(extractAction('需要我做哪一条？'), '');
+  assert.equal(extractAction(TABLE_ANSWER), '');
+});
+
+// Regression cases taken from a real session: tables that report work done or
+// changes must stay prose even when the answer later asks a choice question.
+test('keeps an implementation table out of the chip row', () => {
+  const answer = [
+    '## 实现',
+    '',
+    '| 模块 | 改动 |',
+    '| --- | --- |',
+    '| ClipboardSource（新） | 读本地剪贴板 |',
+    '| ClientSession | 处理 0x60/0x62 |',
+    '',
+    '## 一个必须说明的边界',
+    '',
+    '原版服务端下行剪贴板用哪个消息类型，我们目前没有证据。',
+    '',
+    '## 还剩的可选项',
+    '',
+    '聊天、语音、4K 路径。要继续哪个？',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), []);
+});
+
+test('keeps a fix table out of a lead that only mentions 方向', () => {
+  const answer = [
+    '之前 `RadminServer_协议命令表.md` 里有几处方向错误，已修：',
+    '',
+    '| 问题 | 修正 |',
+    '| --- | --- |',
+    '| `0x80` 放错了表 | 移到 S→C |',
+    '| 缺 `0x13` | 新增 |',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), []);
+});
+
+test('does not read a passing 用哪个 as the closing choice question', () => {
+  const answer = [
+    '## 记录',
+    '',
+    '| 项 | 说明 |',
+    '| --- | --- |',
+    '| 剪贴板 | 补上行 |',
+    '| 多会话 | 加槽位 |',
+    '',
+    '原版用哪个消息类型我们还没有证据。',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), []);
+});
+
+test('extracts a table under a next-step heading with no question after it', () => {
+  const answer = [
+    '## 下一步的两个做法',
+    '',
+    '| 方案 | 好处 |',
+    '| --- | --- |',
+    '| A. 卡住再填 | 时序可控 |',
+    '| B. 直接断 recv 侧 | 不依赖 UI |',
+    '',
+    '我建议 A 方案；不稳定就退到 B。',
+  ].join('\n');
+  assert.deepEqual(extractSuggestedOptions(answer), [
+    'A. 卡住再填',
+    'B. 直接断 recv 侧',
+  ]);
+});

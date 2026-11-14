@@ -729,7 +729,11 @@ window.__ModuleLoader__.load({
         const sentence = sentences[index].trim();
         if (!sentence) continue;
         const action = extractFromSentence(sentence, isQuestion(sentence));
-        if (action) return action;
+        if (!action) continue;
+        // "要我接着做哪一项？" repeats the choice question instead of naming
+        // an action: the options are the chips, so this is not one. Stop here
+        // rather than scanning earlier sentences for table notes or stale asks.
+        return CHOICE_ASK.test(action) ? '' : action;
       }
       // No quoted reply or question: fall back to a statement that asks the
       // user to finish a prerequisite and report back.
@@ -760,6 +764,14 @@ window.__ModuleLoader__.load({
       /(?:哪一?[个项步条种样]|选哪|要选|挑哪|走哪|用哪|先做哪|先修哪|按哪|怎么选|你定|你决定|which one|which (?:should|would|do)|what do you want)/iu;
 
     /**
+     * A captured phrase that repeats the choice question instead of naming an
+     * action, as in "要我接着做哪一项？". Such text is never a usable chip: the
+     * options it refers to are the chips, and a chip that asks the same
+     * question would just send the question back to the Agent.
+     */
+    const CHOICE_ASK = /(?:哪一?[个项步条种]|选哪|挑哪|which one)/iu;
+
+    /**
      * Lead-ins that introduce a report rather than a choice: a list under one
      * of these stays prose even when it ends the answer and every item starts
      * with a verb.
@@ -773,6 +785,23 @@ window.__ModuleLoader__.load({
      */
     const ACTION_START =
       /^(?:写|重写|实现|修改|改成|改用|换成|替换|添加|新增|增加|加上|删除|移除|修复|修好|重构|迁移|升级|更新|安装|装上|部署|发版|发布|提交|推送|打标签|运行|执行|跑|测试|编译|构建|启动|重启|关机|关闭|停止|回滚|重置|清理|优化|补充|补|接入|对接|提取|验证|检查|排查|调查|继续|接着|试|先|用|把|换)/u;
+
+    /**
+     * A table lead-in that frames its rows as choices, such as
+     * "## 下一步可继续的方向" or "可选方案：".
+     *
+     * The framing word has to end the line (an optional colon may follow), so
+     * a sentence that merely mentions "方向错误，已修：" is not read as one.
+     */
+    const TABLE_CHOICE_LEAD =
+      /(?:下一步|接下来|后续|可选|备选|选项|方案|做法|方向|顺序|选择|路线|两条路|两种做法|三个方向|options?)[^，。；!?]{0,12}[：:]?\s*$/iu;
+
+    /**
+     * Lead-ins that introduce a report above a table: such a table lists what
+     * was done or fixed, never the options to pick from.
+     */
+    const TABLE_NEGATIVE_LEAD =
+      /(?:改动|变更|修正|已修|修复|错误|问题|结论|结果|证据|状态|清单|输出|目录|进度|日志|实现|提交|包含|包括|涉及|如下|已完成)/u;
 
     /**
      * Blank out fenced code blocks: numbered lines there are output, not
@@ -877,6 +906,110 @@ window.__ModuleLoader__.load({
       return '';
     };
 
+    /** A markdown table delimiter row, as in `| --- | :---: |` or `--- | ---`. */
+    const TABLE_DELIMITER = /^\s*\|?\s*:?-{2,}:?\s*(?:\|\s*:?-{2,}:?\s*)*\|?\s*$/u;
+
+    /**
+     * Split one markdown table line into its cells.
+     *
+     * @param line - one raw line.
+     * @returns trimmed cell texts.
+     */
+    const tableCellsOf = (line) =>
+      String(line ?? '')
+        .trim()
+        .replace(/^\|/u, '')
+        .replace(/\|$/u, '')
+        .split('|')
+        .map((cell) => cell.trim());
+
+    /**
+     * Read the markdown tables whose first column may name the offered options.
+     *
+     * A table only counts when a delimiter row follows its header, so prose
+     * that merely contains a pipe is never read as rows. The first column of
+     * every data row becomes one candidate; the remaining columns are notes
+     * about it and stay out of the chip.
+     *
+     * @param source - whole (fence-free) answer.
+     * @returns `{ blocks, taken }`: option blocks plus the line indexes they use.
+     */
+    const tableBlocksOf = (source) => {
+      const lines = source.split('\n');
+      const offsets = [];
+      let cursor = 0;
+      for (const line of lines) {
+        offsets.push(cursor);
+        cursor += line.length + 1;
+      }
+
+      const blocks = [];
+      const taken = new Set();
+      for (let index = 0; index + 1 < lines.length; index += 1) {
+        const header = lines[index];
+        if (!header.includes('|') || !TABLE_DELIMITER.test(lines[index + 1])) {
+          continue;
+        }
+        const columns = tableCellsOf(lines[index + 1]).length;
+        if (tableCellsOf(header).length !== columns) continue;
+
+        const items = [];
+        let end = index + 1;
+        for (let row = index + 2; row < lines.length; row += 1) {
+          const line = lines[row];
+          if (!line.trim() || !line.includes('|')) break;
+          const cells = tableCellsOf(line);
+          if (cells.length !== columns) break;
+          end = row;
+          if (cells[0]) items.push(cells[0]);
+        }
+        if (!items.length) continue;
+        for (let row = index; row <= end; row += 1) taken.add(row);
+        blocks.push({
+          start: offsets[index],
+          end: offsets[end] + lines[end].length,
+          items,
+          table: true,
+        });
+        index = end;
+      }
+      return { blocks, taken };
+    };
+
+    /**
+     * Blank out the lines already read as table options.
+     *
+     * Only their characters are replaced, so every offset, lead-in and tail
+     * keeps pointing at the same text; the rows themselves must not be read as
+     * list items by the scan below.
+     *
+     * @param source - whole (fence-free) answer.
+     * @param taken - line indexes used by table blocks.
+     * @returns the answer with those lines replaced by spaces.
+     */
+    const maskTableLines = (source, taken) =>
+      source
+        .split('\n')
+        .map((line, index) =>
+          taken.has(index) ? ' '.repeat(line.length) : line,
+        )
+        .join('\n');
+
+    /**
+     * Whether a choice question sits right under a table.
+     *
+     * The window is split into sentences so a passing mention such as "原版用
+     * 哪个消息类型我们还没有证据" is not read as the closing ask; only a real
+     * question that names the choice counts.
+     *
+     * @param tail - text after the block.
+     * @returns true when one of the next sentences asks which option to take.
+     */
+    const asksChoiceNearby = (tail) =>
+      (String(tail ?? '').match(/[^。！？!?\n]+[。！？!?]?/gu) || []).some(
+        (sentence) => isQuestion(sentence) && CHOICE_AFTER.test(sentence),
+      );
+
     /**
      * Split one line that carries several inline ordinals, as in
      * "① 剪贴板兼容；② 多会话槽；③ 命令定名。".
@@ -956,10 +1089,15 @@ window.__ModuleLoader__.load({
       const source = withoutFences(text);
       if (!source.trim()) return [];
 
+      // Tables pack their rows into pipe cells, so they are read first and
+      // then blanked out; the scan below only sees list-shaped lines.
+      const { blocks: tableBlocks, taken } = tableBlocksOf(source);
+      const prose = maskTableLines(source, taken);
+
       const blocks = [];
       let offset = 0;
       let run = null;
-      for (const line of source.split('\n')) {
+      for (const line of prose.split('\n')) {
         const start = offset;
         const end = offset + line.length;
         offset = end + 1;
@@ -997,26 +1135,44 @@ window.__ModuleLoader__.load({
         }
       }
       if (run) blocks.push(run);
+      for (const block of tableBlocks) blocks.push(block);
+      blocks.sort((left, right) => left.start - right.start);
 
       for (let index = blocks.length - 1; index >= 0; index -= 1) {
         const block = blocks[index];
-        const lead = [block.lead, leadLineOf(source, block.start)]
+        const lead = [block.lead, leadLineOf(prose, block.start)]
           .filter(Boolean)
           .join(' ');
-        const tail = `${block.tail || ''} ${source.slice(
+        const tail = `${block.tail || ''} ${prose.slice(
           block.end,
           block.end + OPTION_TAIL_WINDOW,
         )}`;
-        const trailing = !source.slice(block.end).trim();
+        const trailing = !prose.slice(block.end).trim();
 
         const options = [];
         for (const raw of block.items) {
-          const option = cleanOption(cutOptionTail(raw).item);
+          // A table cell is already a self-contained title: keep its trailing
+          // parenthetical, which often states the requirement itself
+          // ("（真实两块屏而不是 fake）"), and never cut it at a sentence.
+          const option = block.table
+            ? cleanAction(raw)
+            : cleanOption(cutOptionTail(raw).item);
           if (!option || options.includes(option)) continue;
           options.push(option);
           if (options.length >= MAX_OPTIONS) break;
         }
         if (options.length < 2) continue;
+
+        // A table is only read as choices when the answer frames it as one:
+        // a report table ("实现", "改动清单", "已修") stays prose, and the
+        // closing question has to be a real question right under the table.
+        if (block.table) {
+          if (TABLE_NEGATIVE_LEAD.test(lead)) continue;
+          if (asksChoiceNearby(tail) || TABLE_CHOICE_LEAD.test(lead)) {
+            return options;
+          }
+          continue;
+        }
 
         if (CHOICE_LEAD.test(lead) || CHOICE_AFTER.test(tail)) return options;
 
