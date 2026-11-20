@@ -145,7 +145,7 @@ plugin_manager install_bundle target: "/absolute/path/to/DeepSeek-Plugin/Quick-C
 
 ## 测试
 
-提取逻辑是 `client.js` 里的纯函数，Host 端的模型调用与回复清洗在 `index.js`。测试用 Node 22 自带 runner：`test/suggestion.test.mjs` 把 `client.js` 中标记为“leading suggestion”的纯函数段落求值后直接断言；`test/analyze.test.mjs` 直接 `import` `index.js`，用假的 `ctx` 模拟模型流。两者都不启动浏览器、不访问网络：
+提取逻辑是 `client.js` 里的纯函数，Host 端的模型调用与回复清洗在 `index.js`。测试用 Node 自带 runner（当前 DSH 要求 Node 24.9+，已在 Node 24.22 上跑通）：`test/suggestion.test.mjs` 把 `client.js` 中标记为“leading suggestion”的纯函数段落求值后直接断言；`test/analyze.test.mjs` 直接 `import` `index.js`，用假的 `ctx` 模拟模型流。两者都不启动浏览器、不访问网络：
 
 ```bash
 cd Quick-Command
@@ -181,10 +181,14 @@ npm test
 
 ## 兼容性
 
-- 已在 DeepSeek Harness `0.2.1-rc.2` 上验证。
-- `package.json` 通过 `engines.dsh` 声明 `>=0.2.1-rc.2 <0.3.0`；不满足时安装会被拒绝。
-- 依赖宿主提供的 `conversation.input.dock` 插槽、`InputActions.setDraft/submit()` 与 Session 作用域插槽的 `useChat()` 快照，不引入任何运行时依赖。
-- AI 解析依赖 web profile 的 `webServer`、`connection`、`llm` 与 `agentDefaultModel` 服务，以及已配置的默认模型；在 CLI / ACP 等没有 Web 服务的 profile 下接口不注册，插件继续按本地规则工作。修改 `index.js` 后需要重启 DSH。
+- 已对照 DeepSeek Harness `0.2.2-rc.5` 的宿主与客户端源码逐项核对，`npm test` 全部通过；宿主侧接口在本机运行中的 `0.2.2-rc.5` Desktop 上实测仍有响应（未登录请求返回 401）。浏览器内的渲染效果未做截图验证。
+- `package.json` 通过 `engines.dsh` 声明 `>=0.2.1-rc.2 <0.3.0`；不满足时安装会被拒绝。`0.2.2-rc.5` 在 `includePrerelease` 语义下满足该范围。
+- 浏览器半个只使用当前版本仍在提供、且未标记废弃的接口：`conversation.input.dock` 插槽（`kind: list`、`scope: session`）及其实例标准 props `useInput` / `useSession` / `useChat` / `inputActions`，`InputActions.setDraft()` / `submit()`，`ctx.slots.inject()` / `register({ name, id, order, locale })`，`ctx.locale.register(ns, { zh, en })`。
+- `dsh.client.inject` 声明 `@deepseek-ai/dsh-client-locale`、`@deepseek-ai/dsh-client-ui-chat`、`@deepseek-ai/dsh-client-ui-conversation`：词典、`useChat` 与插槽分别由这三者提供，模块图据此先加载依赖；依赖缺失时只是不渲染对应内容，不会装载失败。
+- 下一步建议读取 Chat 快照的 `legacy.nodes`（当前版本仍保留该兼容切片，供输入区统计与兼容投影使用）；Chat 目标或该切片不存在时建议为空，预制/自定义命令照常显示，不会抛错。
+- 样式只依赖当前版本存在的主题 token（`--dsw-alias-*`、`--dsw-font-xs-strong-13`、`--dsw-font-family`）与输入框宽度变量（`--dsh-composer-side-clearance`、`--dsh-composer-card-max-width`）。
+- AI 解析依赖 web profile 的 `webServer`、`connection`、`llm` 与 `agentDefaultModel` 服务，以及已配置的默认模型；`POST /plugins/dsh-quick-commands/analyze` 先经 `connection.requestRejection()` 做同源与登录校验，再自行限制请求体大小与媒体类型。在 CLI / ACP 等没有 Web 服务的 profile 下接口不注册，插件继续按本地规则工作。修改 `index.js` 后需要重启 DSH。
+- `ctx.llm.stream()` 的 `purpose: 'quick-commands'` 是辅助用途标记：当前版本只在类型层要求生产方声明用途（`LlmRequestPurposeMap`），运行时仍接受字符串，纯 JS bundle 无需额外声明。
 
 ## 实现结构
 
@@ -194,7 +198,7 @@ npm test
 | `POST /plugins/dsh-quick-commands/analyze` | host | 同源、鉴权的分析接口，用默认模型把最后一条回答提取成 0～5 条回复（`{ replies }`） |
 
 - 可见性来自 `useSession()`（`running` / `openState` / `blank`）和 `useInput()`（`phase` / `draft`），只订阅需要的切片；宿主的 `blank`（新会话标记）为真时整行不渲染，首轮对话结束后随 `blank` 变为 `false` 自动出现。
-- 下一步建议用插槽自带的 `useChat()` 订阅 `legacy.nodes`，只把“最后一条 Assistant 文本”作为 selector 结果；提取函数是纯函数，文本不变就不重新计算，也不轮询。先看收尾处是否列了多个选项（`extractSuggestedOptions` 拆成 2～5 个 chip）：列表或 markdown 表格被“选一项”的引导词或反问句包围，或者列表本身就是整条回答的最后一段且每项都以动作开头，都算；表格先由 `tableBlocksOf` 按“表头 + 分隔行”识别、取第一列，再把这些行从文本里抹掉，避免同一批内容又被当成列表。没有这种列表时，再按单条规则提取：引号动作、冒号后的短回复、问句（“接着做哪一项”这类纯选择疑问会被 `CHOICE_ASK` 丢弃），最后回退到“完成后告诉我”这类等待条件。
+- 下一步建议用插槽自带的 `useChat()` 订阅 `legacy.nodes`（Chat 目标或其兼容切片缺席时退回空文本，只隐藏建议），只把“最后一条 Assistant 文本”作为 selector 结果；提取函数是纯函数，文本不变就不重新计算，也不轮询。先看收尾处是否列了多个选项（`extractSuggestedOptions` 拆成 2～5 个 chip）：列表或 markdown 表格被“选一项”的引导词或反问句包围，或者列表本身就是整条回答的最后一段且每项都以动作开头，都算；表格先由 `tableBlocksOf` 按“表头 + 分隔行”识别、取第一列，再把这些行从文本里抹掉，避免同一批内容又被当成列表。没有这种列表时，再按单条规则提取：引号动作、冒号后的短回复、问句（“接着做哪一项”这类纯选择疑问会被 `CHOICE_ASK` 丢弃），最后回退到“完成后告诉我”这类等待条件。
 - 开启 AI 解析时，客户端在回答变化后向同源接口发一次请求（`AbortController` 超时、按回答文本缓存 20 条），模型返回前先显示本地结果；失败、404 或超时回退本地结果。Host 端用 `agentDefaultModel.currentSelection()` 选路、`ctx.llm.stream()` 调用，`maxTokens` 320、超时 8 秒，返回 `{ replies }` 数组。
 - 预制命令的删除记录与自定义命令各由一个模块级 store + `useSyncExternalStore` 在各会话实例间共享，写入 `localStorage`；监听 `storage` 事件做跨标签页同步。AI 开关同样走这套 store。
 - 样式只使用宿主主题 token（`--dsw-alias-*`）与输入框宽度变量，明暗主题自动适配。

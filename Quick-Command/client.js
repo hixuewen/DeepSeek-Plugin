@@ -1465,6 +1465,17 @@ window.__ModuleLoader__.load({
     });
 
     /**
+     * Selector hook used when the composition provides no Chat target.
+     *
+     * `useChat` is a Chat-owned standard prop, so a UI composition without that
+     * target has none; the fixed commands still work there, only the suggestions
+     * derived from the Agent's answer disappear.
+     *
+     * @returns the empty answer text.
+     */
+    const noChat = () => '';
+
+    /**
      * The quick-command row for one Session.
      *
      * @param props - Session-scope slot props: stable `inputActions`, the
@@ -1490,8 +1501,11 @@ window.__ModuleLoader__.load({
         getVisibleBuiltin,
         getVisibleBuiltin,
       );
-      const lastAnswer = props.useChat((state) =>
-        latestAssistantText(state.legacy.nodes),
+      // `useChat` and its `legacy` slice belong to the Chat target; guard both so
+      // a composition without them keeps the fixed commands instead of throwing.
+      const useChat = typeof props.useChat === 'function' ? props.useChat : noChat;
+      const lastAnswer = useChat((state) =>
+        latestAssistantText(state && state.legacy ? state.legacy.nodes : undefined),
       );
 
       const [dismissed, setDismissed] = React.useState(false);
